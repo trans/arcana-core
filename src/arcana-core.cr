@@ -7,9 +7,10 @@ require "./arcana-core/bus"
 require "./arcana-core/service"
 require "./arcana-core/client"
 require "./arcana-core/events"
+require "./arcana-core/state_backend"
 
 module Arcana
   module Core
-    VERSION = "0.3.0"
+    VERSION = "0.4.0"
   end
 end
