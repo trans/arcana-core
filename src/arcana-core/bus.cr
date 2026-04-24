@@ -22,39 +22,6 @@ module Arcana
     property directory : Directory?
     property mailbox_factory : MailboxFactory = ->(address : String) { Mailbox.new(address).as(Mailbox) }
 
-    # Resolve an address. Strategy:
-    # 1. Try directory resolution (handles bare → qualified)
-    # 2. If raw address has a mailbox, use it
-    # 3. If a qualified form has a mailbox, use it (raises if ambiguous)
-    # 4. Fall back to raw address
-    def resolve_address(address : String) : String
-      if dir = @directory
-        if resolved = dir.resolve?(address)
-          return resolved
-        end
-      end
-
-      @mutex.synchronize do
-        return address if @mailboxes.has_key?(address)
-        return address if Directory.qualified?(address)
-
-        agent_key = "#{address}:agent"
-        service_key = "#{address}:service"
-        has_agent = @mailboxes.has_key?(agent_key)
-        has_service = @mailboxes.has_key?(service_key)
-
-        if has_agent && has_service
-          raise Error.new("Ambiguous address '#{address}' — use '#{agent_key}' or '#{service_key}'")
-        elsif has_agent
-          agent_key
-        elsif has_service
-          service_key
-        else
-          address
-        end
-      end
-    end
-
     # Get or create a mailbox for an address.
     def mailbox(address : String) : Mailbox
       @mutex.synchronize do
@@ -71,8 +38,7 @@ module Arcana
 
     # Does a mailbox exist for this address?
     def has_mailbox?(address : String) : Bool
-      resolved = resolve_address(address)
-      @mutex.synchronize { @mailboxes.has_key?(resolved) }
+      @mutex.synchronize { @mailboxes.has_key?(address) }
     end
 
     # Remove a mailbox. Messages in flight are lost.
@@ -115,8 +81,7 @@ module Arcana
 
     # Pending message count for an address. Returns 0 if no mailbox.
     def pending(address : String) : Int32
-      resolved = resolve_address(address)
-      mb = @mutex.synchronize { @mailboxes[resolved]? }
+      mb = @mutex.synchronize { @mailboxes[address]? }
       mb.try(&.pending) || 0
     end
 
@@ -124,8 +89,7 @@ module Arcana
 
     # Send an envelope to its `to` address.
     def send(envelope : Envelope)
-      resolved = resolve_address(envelope.to)
-      mb = @mutex.synchronize { @mailboxes[resolved]? }
+      mb = @mutex.synchronize { @mailboxes[envelope.to]? }
       raise Error.new("No mailbox for address: #{envelope.to}") unless mb
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
       mb.deliver(envelope)
@@ -133,8 +97,7 @@ module Arcana
 
     # Send, but silently drop if the target mailbox doesn't exist.
     def send?(envelope : Envelope) : Bool
-      resolved = resolve_address(envelope.to)
-      mb = @mutex.synchronize { @mailboxes[resolved]? }
+      mb = @mutex.synchronize { @mailboxes[envelope.to]? }
       return false unless mb
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
       mb.deliver(envelope)
@@ -145,8 +108,7 @@ module Arcana
     # Returns the correlation_id for tracking.
     def send_expecting(envelope : Envelope) : String
       if !envelope.from.empty?
-        from_resolved = resolve_address(envelope.from)
-        from_mb = mailbox(from_resolved)
+        from_mb = mailbox(envelope.from)
         from_mb.expect(envelope.correlation_id)
       end
       send(envelope)
@@ -210,17 +172,11 @@ module Arcana
 
     # -- Unified delivery --
 
-    # Resolve ordering: Auto looks up target kind in the directory.
-    # Service → Sync, Agent (or unknown) → Async.
+    # Resolve ordering: syntactic — service addresses (colon) are sync,
+    # agent addresses (no colon) are async.
     def resolve_ordering(envelope : Envelope) : Ordering
       return envelope.ordering unless envelope.ordering.auto?
-      if dir = @directory
-        resolved = dir.resolve?(envelope.to)
-        if resolved && (listing = dir.lookup(resolved))
-          return listing.kind.service? ? Ordering::Sync : Ordering::Async
-        end
-      end
-      Ordering::Async
+      Directory.service?(envelope.to) ? Ordering::Sync : Ordering::Async
     end
 
     # Dispatch based on the envelope's ordering field (auto-resolved).

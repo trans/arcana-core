@@ -213,19 +213,17 @@ describe Arcana::Bus do
 
       dir.register(Arcana::Directory::Listing.new(
         address: "stale", name: "Stale", description: "stale agent",
-        kind: Arcana::Directory::Kind::Agent,
       ))
       dir.register(Arcana::Directory::Listing.new(
-        address: "svc", name: "Svc", description: "service",
-        kind: Arcana::Directory::Kind::Service,
+        address: "arcana:svc", name: "Svc", description: "service",
       ))
-      dir.set_last_seen("stale:agent", Time.utc - 2.days)
-      dir.set_last_seen("svc:service", Time.utc - 30.days)
+      dir.set_last_seen("stale", Time.utc - 2.days)
+      dir.set_last_seen("arcana:svc", Time.utc - 30.days)
 
       listings, _mailboxes = bus.prune_stale(1.day, 7.days)
-      listings.should contain("stale:agent")
-      listings.should_not contain("svc:service")
-      dir.lookup("svc:service").should_not be_nil
+      listings.should contain("stale")
+      listings.should_not contain("arcana:svc")
+      dir.lookup("arcana:svc").should_not be_nil
     end
 
     it "prunes mailboxes after listing is gone and mailbox TTL exceeded" do
@@ -233,12 +231,12 @@ describe Arcana::Bus do
       dir = Arcana::Directory.new
       bus.directory = dir
 
-      mb = bus.mailbox("orphan:agent")
+      mb = bus.mailbox("orphan")
       mb.last_activity = Time.utc - 4.days
 
       _listings, mailboxes = bus.prune_stale(1.day, 3.days)
-      mailboxes.should contain("orphan:agent")
-      bus.has_mailbox?("orphan:agent").should be_false
+      mailboxes.should contain("orphan")
+      bus.has_mailbox?("orphan").should be_false
     end
 
     it "keeps mailboxes while their listing is still registered" do
@@ -248,13 +246,12 @@ describe Arcana::Bus do
 
       dir.register(Arcana::Directory::Listing.new(
         address: "active", name: "Active", description: "live agent",
-        kind: Arcana::Directory::Kind::Agent,
       ))
-      mb = bus.mailbox("active:agent")
+      mb = bus.mailbox("active")
       mb.last_activity = Time.utc - 30.days # old, but listing is fresh
 
       _listings, mailboxes = bus.prune_stale(1.day, 3.days)
-      mailboxes.should_not contain("active:agent")
+      mailboxes.should_not contain("active")
     end
 
     it "refreshes last_seen on send from an address" do
@@ -264,17 +261,15 @@ describe Arcana::Bus do
 
       dir.register(Arcana::Directory::Listing.new(
         address: "sender", name: "S", description: "s",
-        kind: Arcana::Directory::Kind::Agent,
       ))
       dir.register(Arcana::Directory::Listing.new(
         address: "receiver", name: "R", description: "r",
-        kind: Arcana::Directory::Kind::Agent,
       ))
-      bus.mailbox("receiver:agent")
-      dir.set_last_seen("sender:agent", Time.utc - 2.days)
+      bus.mailbox("receiver")
+      dir.set_last_seen("sender", Time.utc - 2.days)
 
-      bus.send(Arcana::Envelope.new(from: "sender:agent", to: "receiver:agent"))
-      (Time.utc - dir.last_seen("sender:agent").not_nil!).should be < 1.second
+      bus.send(Arcana::Envelope.new(from: "sender", to: "receiver"))
+      (Time.utc - dir.last_seen("sender").not_nil!).should be < 1.second
     end
 
     it "refreshes last_seen on mailbox receive" do
@@ -284,13 +279,12 @@ describe Arcana::Bus do
 
       dir.register(Arcana::Directory::Listing.new(
         address: "a", name: "A", description: "a",
-        kind: Arcana::Directory::Kind::Agent,
       ))
-      mb = bus.mailbox("a:agent")
-      dir.set_last_seen("a:agent", Time.utc - 2.days)
+      mb = bus.mailbox("a")
+      dir.set_last_seen("a", Time.utc - 2.days)
 
       mb.try_receive # empty, but proves liveness
-      (Time.utc - dir.last_seen("a:agent").not_nil!).should be < 1.second
+      (Time.utc - dir.last_seen("a").not_nil!).should be < 1.second
     end
   end
 end

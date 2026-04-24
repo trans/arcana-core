@@ -6,7 +6,7 @@ module Arcana
   #   svc = Arcana::Service.new(
   #     bus: bus,
   #     directory: dir,
-  #     address: "resizer",
+  #     address: "arcana:resizer",   # owner:capability
   #     name: "Image Resizer",
   #     description: "Resizes images to specified dimensions",
   #     schema: JSON.parse(%({"type":"object","properties":{...},"required":["path","width"]})),
@@ -25,7 +25,7 @@ module Arcana
     def initialize(
       @bus : Bus,
       @directory : Directory,
-      address : String,
+      @address : String,
       @name : String,
       @description : String,
       @schema : JSON::Any? = nil,
@@ -33,7 +33,8 @@ module Arcana
       @tags : Array(String) = [] of String,
       &handler : JSON::Any -> JSON::Any
     )
-      @address = Directory.qualify(address, Directory::Kind::Service)
+      raise Error.new("Service address must be owner:capability, got #{@address.inspect}") unless Directory.service?(@address)
+      Directory.validate_address(@address)
       @handler = handler
       @running = false
 
@@ -41,7 +42,6 @@ module Arcana
         address: @address,
         name: @name,
         description: @description,
-        kind: Directory::Kind::Service,
         schema: @schema,
         guide: @guide,
         tags: @tags,

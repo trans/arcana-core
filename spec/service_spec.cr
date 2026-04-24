@@ -5,16 +5,29 @@ describe Arcana::Service do
     bus = Arcana::Bus.new
     dir = Arcana::Directory.new
 
-    svc = Arcana::Service.new(
+    Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "echo",
+      address: "test:echo",
       name: "Echo",
       description: "Echoes input back",
     ) { |data| data }
 
-    listing = dir.lookup("echo")
+    listing = dir.lookup("test:echo")
     listing.should_not be_nil
     listing.not_nil!.kind.should eq(Arcana::Directory::Kind::Service)
+  end
+
+  it "rejects bare (agent-style) addresses" do
+    bus = Arcana::Bus.new
+    dir = Arcana::Directory.new
+    expect_raises(Arcana::Error, /must be owner:capability/) do
+      Arcana::Service.new(
+        bus: bus, directory: dir,
+        address: "bare",
+        name: "Nope",
+        description: "won't work",
+      ) { |d| d }
+    end
   end
 
   it "handles requests and returns results" do
@@ -23,7 +36,7 @@ describe Arcana::Service do
 
     svc = Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "doubler",
+      address: "test:doubler",
       name: "Doubler",
       description: "Doubles a number",
     ) do |data|
@@ -37,7 +50,7 @@ describe Arcana::Service do
     )
 
     result = bus.request(
-      Arcana::Envelope.new(from: "client", to: "doubler", payload: payload),
+      Arcana::Envelope.new(from: "client", to: "test:doubler", payload: payload),
       timeout: 1.second,
     )
 
@@ -54,7 +67,7 @@ describe Arcana::Service do
 
     svc = Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "greeter",
+      address: "test:greeter",
       name: "Greeter",
       description: "Greets by name and age",
       schema: schema,
@@ -63,13 +76,12 @@ describe Arcana::Service do
     end
     svc.start
 
-    # Send request missing "age"
     payload = Arcana::Protocol.request(
       JSON::Any.new({"name" => JSON::Any.new("Alice")}),
     )
 
     result = bus.request(
-      Arcana::Envelope.new(from: "client", to: "greeter", payload: payload),
+      Arcana::Envelope.new(from: "client", to: "test:greeter", payload: payload),
       timeout: 1.second,
     )
 
@@ -84,7 +96,7 @@ describe Arcana::Service do
 
     svc = Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "echo",
+      address: "test:echo",
       name: "Echo",
       description: "Echoes back",
     ) { |data| data }
@@ -92,7 +104,7 @@ describe Arcana::Service do
 
     result = bus.request(
       Arcana::Envelope.new(
-        from: "client", to: "echo",
+        from: "client", to: "test:echo",
         payload: JSON::Any.new("raw message"),
       ),
       timeout: 1.second,
@@ -109,14 +121,14 @@ describe Arcana::Service do
 
     svc = Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "crasher",
+      address: "test:crasher",
       name: "Crasher",
       description: "Always fails",
     ) { |_| raise "boom" }
     svc.start
 
     result = bus.request(
-      Arcana::Envelope.new(from: "client", to: "crasher", payload: JSON::Any.new(nil)),
+      Arcana::Envelope.new(from: "client", to: "test:crasher", payload: JSON::Any.new(nil)),
       timeout: 1.second,
     )
 
@@ -133,25 +145,23 @@ describe Arcana::Service do
 
     svc = Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "imager",
+      address: "test:imager",
       name: "Image Generator",
       description: "Generates images",
       schema: schema,
       guide: "Send a prompt to generate an image. Width defaults to 1024. Use short, descriptive prompts for best results.",
-    ) { |data| JSON::Any.new("ok") }
+    ) { |_data| JSON::Any.new("ok") }
     svc.start
 
-    # Ask for help
     payload = Arcana::Protocol.request(JSON::Any.new(nil), intent: "help")
     result = bus.request(
-      Arcana::Envelope.new(from: "client", to: "imager", payload: payload),
+      Arcana::Envelope.new(from: "client", to: "test:imager", payload: payload),
       timeout: 1.second,
     )
 
     result.should_not be_nil
     Arcana::Protocol.help?(result.not_nil!.payload).should be_true
     Arcana::Protocol.guide(result.not_nil!.payload).should eq("Send a prompt to generate an image. Width defaults to 1024. Use short, descriptive prompts for best results.")
-    # Schema is included too
     result.not_nil!.payload["schema"]["required"].as_a.map(&.as_s).should eq(["prompt"])
   end
 
@@ -161,7 +171,7 @@ describe Arcana::Service do
 
     svc = Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "simple",
+      address: "test:simple",
       name: "Simple",
       description: "A simple service",
     ) { |data| data }
@@ -169,7 +179,7 @@ describe Arcana::Service do
 
     payload = Arcana::Protocol.request(JSON::Any.new(nil), intent: "help")
     result = bus.request(
-      Arcana::Envelope.new(from: "client", to: "simple", payload: payload),
+      Arcana::Envelope.new(from: "client", to: "test:simple", payload: payload),
       timeout: 1.second,
     )
 
@@ -181,19 +191,18 @@ describe Arcana::Service do
     bus = Arcana::Bus.new
     dir = Arcana::Directory.new
 
-    svc = Arcana::Service.new(
+    Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "guided",
+      address: "test:guided",
       name: "Guided",
       description: "Has a guide",
       guide: "Here's how to use me.",
     ) { |data| data }
 
-    listing = dir.lookup("guided")
+    listing = dir.lookup("test:guided")
     listing.should_not be_nil
     listing.not_nil!.guide.should eq("Here's how to use me.")
 
-    # JSON output includes guide
     json = JSON.parse(listing.not_nil!.to_json)
     json["guide"].as_s.should eq("Here's how to use me.")
   end
@@ -204,13 +213,13 @@ describe Arcana::Service do
 
     svc = Arcana::Service.new(
       bus: bus, directory: dir,
-      address: "tmp",
+      address: "test:tmp",
       name: "Tmp",
       description: "Temporary",
     ) { |d| d }
     svc.start
     svc.stop
 
-    dir.lookup("tmp").should be_nil
+    dir.lookup("test:tmp").should be_nil
   end
 end

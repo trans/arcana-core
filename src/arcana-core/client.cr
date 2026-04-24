@@ -11,8 +11,7 @@ module Arcana
   #
   #   client = Arcana::Client.new(
   #     url: "ws://localhost:19118/bus",
-  #     address: "shoppe",
-  #     kind: Arcana::Directory::Kind::Service,
+  #     address: "shoppe:storefront",   # services: owner:capability
   #     name: "Shoppe",
   #     description: "Print-on-demand storefront generator",
   #     tags: ["storefront", "print-on-demand"],
@@ -26,7 +25,6 @@ module Arcana
   #
   class Client
     getter address : String
-    getter kind : Directory::Kind
 
     @ws : HTTP::WebSocket?
     @handler : Proc(Envelope, Nil)?
@@ -36,14 +34,18 @@ module Arcana
 
     def initialize(
       url : String,
-      address : String,
-      @kind : Directory::Kind = Directory::Kind::Agent,
+      @address : String,
       @name : String? = nil,
       @description : String? = nil,
       @tags : Array(String) = [] of String,
     )
       @url = url
-      @address = Directory.qualify(address, @kind)
+      Directory.validate_address(@address)
+    end
+
+    # Is this client registered as a service (vs. an agent)?
+    def service? : Bool
+      Directory.service?(@address)
     end
 
     # Register a handler for incoming envelopes. Set before calling `connect`.
@@ -145,8 +147,7 @@ module Arcana
     private def send_join
       frame = {
         "type"    => JSON::Any.new("join"),
-        "address" => JSON::Any.new(Directory.bare_name(@address)),
-        "kind"    => JSON::Any.new(@kind.to_s.downcase),
+        "address" => JSON::Any.new(@address),
       } of String => JSON::Any
       if name = @name
         frame["name"] = JSON::Any.new(name)
