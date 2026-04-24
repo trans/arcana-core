@@ -22,6 +22,12 @@ module Arcana
     property directory : Directory?
     property mailbox_factory : MailboxFactory = ->(address : String) { Mailbox.new(address).as(Mailbox) }
 
+    # Optional event recorder. When set, material bus actions (sends,
+    # publishes, subscribe/unsubscribe, prune) emit events. Newly
+    # created mailboxes inherit this recorder via their persistence
+    # hooks.
+    property events : Events::Backend?
+
     # Get or create a mailbox for an address.
     def mailbox(address : String) : Mailbox
       @mutex.synchronize do
@@ -32,6 +38,7 @@ module Arcana
             nil
           }
         end
+        mb.events ||= @events
         mb
       end
     end
@@ -93,6 +100,7 @@ module Arcana
       raise Error.new("No mailbox for address: #{envelope.to}") unless mb
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
       mb.deliver(envelope)
+      record_send(envelope)
     end
 
     # Send, but silently drop if the target mailbox doesn't exist.
@@ -101,7 +109,18 @@ module Arcana
       return false unless mb
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
       mb.deliver(envelope)
+      record_send(envelope)
       true
+    end
+
+    private def record_send(envelope : Envelope)
+      @events.try &.record(Events::Event.new(
+        type: "message.sent",
+        subject: envelope.to,
+        object: (envelope.from.empty? ? nil : envelope.from),
+        correlation_id: envelope.correlation_id,
+        metadata: {"subject" => JSON::Any.new(envelope.subject)} of String => JSON::Any,
+      ))
     end
 
     # Send an envelope and register an expectation for a reply on the sender's mailbox.
@@ -123,13 +142,16 @@ module Arcana
         (@subscriptions[topic] ||= Set(String).new) << address
       end
       @directory.try(&.touch(address))
+      @events.try &.record(Events::Event.new(type: "subscription.added", subject: topic, object: address))
     end
 
     # Unsubscribe an address from a topic.
     def unsubscribe(topic : String, address : String)
-      @mutex.synchronize do
-        @subscriptions[topic]?.try(&.delete(address))
+      removed = @mutex.synchronize do
+        set = @subscriptions[topic]?
+        set && set.delete(address)
       end
+      @events.try &.record(Events::Event.new(type: "subscription.removed", subject: topic, object: address)) if removed
     end
 
     # List topics an address is subscribed to.
@@ -155,6 +177,7 @@ module Arcana
       subs = @mutex.synchronize { @subscriptions[topic]?.try(&.dup) }
       return unless subs
 
+      delivered_to = 0
       subs.each do |address|
         mb = @mutex.synchronize { @mailboxes[address]? }
         next unless mb
@@ -167,7 +190,15 @@ module Arcana
           reply_to: envelope.reply_to,
         )
         mb.deliver(msg)
+        delivered_to += 1
       end
+      @events.try &.record(Events::Event.new(
+        type: "topic.published",
+        subject: topic,
+        object: (envelope.from.empty? ? nil : envelope.from),
+        correlation_id: envelope.correlation_id,
+        metadata: {"subscribers" => JSON::Any.new(delivered_to.to_i64)} of String => JSON::Any,
+      ))
     end
 
     # -- Unified delivery --

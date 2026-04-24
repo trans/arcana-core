@@ -259,12 +259,46 @@ module Arcana
       @mutex.synchronize { @frozen.size }
     end
 
-    # -- Persistence lifecycle hooks (no-ops by default, overridden by persistence module) --
+    # Optional event recorder. Bus sets this on newly created mailboxes
+    # so deliver/consume/freeze/thaw emit audit events.
+    property events : Events::Backend?
 
-    protected def on_deliver(envelope : Envelope); end
-    protected def on_consume(envelope : Envelope); end
-    protected def on_freeze(id : String, by : String); end
-    protected def on_thaw(id : String); end
+    # -- Persistence lifecycle hooks --
+
+    protected def on_deliver(envelope : Envelope)
+      @events.try &.record(Events::Event.new(
+        type: "message.delivered",
+        subject: @address,
+        object: (envelope.from.empty? ? nil : envelope.from),
+        correlation_id: envelope.correlation_id,
+        metadata: {"subject" => JSON::Any.new(envelope.subject)} of String => JSON::Any,
+      ))
+    end
+
+    protected def on_consume(envelope : Envelope)
+      @events.try &.record(Events::Event.new(
+        type: "message.consumed",
+        subject: @address,
+        correlation_id: envelope.correlation_id,
+      ))
+    end
+
+    protected def on_freeze(id : String, by : String)
+      @events.try &.record(Events::Event.new(
+        type: "message.frozen",
+        subject: @address,
+        correlation_id: id,
+        metadata: (by.empty? ? nil : {"by" => JSON::Any.new(by)} of String => JSON::Any),
+      ))
+    end
+
+    protected def on_thaw(id : String)
+      @events.try &.record(Events::Event.new(
+        type: "message.thawed",
+        subject: @address,
+        correlation_id: id,
+      ))
+    end
 
     # -- Snapshot dump/load --
 

@@ -64,6 +64,10 @@ module Arcana
     @last_seen = {} of String => Time
     @mutex = Mutex.new
 
+    # Optional event recorder. When set, material directory actions
+    # (register, unregister, busy changes, prune) emit events.
+    property events : Events::Backend?
+
     # Is this address a service? (Contains `:` and is not an internal ephemeral.)
     def self.service?(address : String) : Bool
       return false if address.starts_with?('_')
@@ -112,6 +116,14 @@ module Arcana
         @listings[listing.address] = listing
         @last_seen[listing.address] = Time.utc
       end
+      @events.try &.record(Events::Event.new(
+        type: "listing.registered",
+        subject: listing.address,
+        metadata: {
+          "kind" => JSON::Any.new(listing.kind.to_s.downcase),
+          "name" => JSON::Any.new(listing.name),
+        } of String => JSON::Any,
+      ))
     end
 
     # Refresh the last-seen timestamp for an address. No-op if unregistered.
@@ -149,24 +161,39 @@ module Arcana
           @last_seen.delete(addr)
         end
       end
+      if (recorder = @events) && !pruned.empty?
+        pruned.each do |addr|
+          recorder.record(Events::Event.new(type: "listing.pruned", subject: addr))
+        end
+      end
       pruned
     end
 
     # Remove a listing by address. Idempotent — does nothing if unregistered.
     def unregister(address : String)
-      @mutex.synchronize do
-        @listings.delete(address)
+      removed = @mutex.synchronize do
+        r = @listings.delete(address)
         @busy.delete(address)
         @last_seen.delete(address)
+        r
       end
+      @events.try &.record(Events::Event.new(type: "listing.unregistered", subject: address)) if removed
     end
 
     # Mark an address as busy or idle.
     def set_busy(address : String, busy : Bool = true)
-      @mutex.synchronize do
+      prev = @mutex.synchronize do
         raise Error.new("no directory listing for '#{address}'") unless @listings.has_key?(address)
+        p = @busy[address]? || false
         @busy[address] = busy
+        p
       end
+      return if prev == busy
+      @events.try &.record(Events::Event.new(
+        type: "listing.busy_changed",
+        subject: address,
+        metadata: {"busy" => JSON::Any.new(busy)} of String => JSON::Any,
+      ))
     end
 
     # Check if an address is currently busy.
