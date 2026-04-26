@@ -325,9 +325,13 @@ describe Arcana::Directory do
     it "migrates old forms during load" do
       Arcana::Directory.migrate_legacy_address("memo:agent").should eq("memo")
       Arcana::Directory.migrate_legacy_address("chat:openai:service").should eq("openai:chat")
-      Arcana::Directory.migrate_legacy_address("memo:service").should eq("memo:legacy")
       Arcana::Directory.migrate_legacy_address("openai:chat").should eq("openai:chat")
       Arcana::Directory.migrate_legacy_address("alice").should eq("alice")
+    end
+
+    it "returns nil for unmappable owner-less services" do
+      Arcana::Directory.migrate_legacy_address("memo:service").should be_nil
+      Arcana::Directory.migrate_legacy_address("wow:service").should be_nil
     end
   end
 end

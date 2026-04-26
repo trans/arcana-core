@@ -297,7 +297,12 @@ module Arcana
       count = 0
       @mutex.synchronize do
         parsed.as_a.each do |entry|
-          address = Directory.migrate_legacy_address(entry["address"].as_s)
+          original = entry["address"].as_s
+          address = Directory.migrate_legacy_address(original)
+          unless address
+            STDERR.puts "Directory: dropping unmappable legacy address #{original.inspect} (re-register with owner:capability)"
+            next
+          end
           next if @listings.has_key?(address)
           @listings[address] = Listing.new(
             address: address,
@@ -313,13 +318,24 @@ module Arcana
       count
     end
 
-    # Migrate a pre-0.14 address to the new format.
-    #   "memo:agent"         → "memo"
+    # Migrate a pre-0.14 address to the new format. Returns nil for
+    # addresses that can't be sensibly mapped — callers should skip
+    # them with a warning rather than fabricate a bogus owner.
+    #
+    #   "memo:agent"          → "memo"
     #   "chat:openai:service" → "openai:chat"    (owner-first reorder)
-    #   "memo:service"        → "memo:legacy"   (no owner in old form — re-register to fix)
+    #   "memo:service"        → nil              (no owner in old form — drop)
     #   "owner:cap" / "foo"   → unchanged
-    # TODO: remove in 0.15 once downstream consumers have migrated.
-    def self.migrate_legacy_address(address : String) : String
+    #
+    # The owner-less ":service" form was a degenerate case from the
+    # original two-token convention. Rewriting it to "<name>:legacy"
+    # (as 0.14.0 originally did) preserved the entry but introduced a
+    # made-up owner that misleads readers; cleaner to drop and let the
+    # registrant re-register with a proper owner:capability.
+    #
+    # TODO: remove this whole helper in 0.16 once no downstream
+    # consumers carry pre-0.14 snapshots.
+    def self.migrate_legacy_address(address : String) : String?
       if address.ends_with?(":agent")
         address.rchop(":agent")
       elsif address.ends_with?(":service")
@@ -328,8 +344,7 @@ module Arcana
           capability, _, owner = base.partition(':')
           "#{owner}:#{capability}"
         else
-          STDERR.puts "  migration: #{address} → #{base}:legacy (re-register with a proper owner)"
-          "#{base}:legacy"
+          nil # unmappable: no owner in old form
         end
       else
         address
