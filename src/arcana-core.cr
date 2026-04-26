@@ -11,6 +11,6 @@ require "./arcana-core/state_backend"
 
 module Arcana
   module Core
-    VERSION = "0.4.0"
+    VERSION = "0.5.0"
   end
 end

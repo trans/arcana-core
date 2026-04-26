@@ -23,6 +23,16 @@ module Arcana
   #
   #   client.connect  # blocks: runs the receive loop
   #
+  # For pure consumers (code that *uses* services but doesn't expose any),
+  # pass `listed: false` so the directory doesn't show an entry that's
+  # never meant to be addressed:
+  #
+  #   client = Arcana::Client.new(
+  #     url: "ws://localhost:19118/bus",
+  #     address: "wow-io",       # plain agent name
+  #     listed: false,           # mailbox only, no directory entry
+  #   )
+  #
   class Client
     getter address : String
 
@@ -38,6 +48,7 @@ module Arcana
       @name : String? = nil,
       @description : String? = nil,
       @tags : Array(String) = [] of String,
+      @listed : Bool = true,
     )
       @url = url
       Directory.validate_address(@address)
@@ -158,6 +169,8 @@ module Arcana
       unless @tags.empty?
         frame["tags"] = JSON::Any.new(@tags.map { |t| JSON::Any.new(t) })
       end
+      # Only emit listed=false; the server defaults to listed when absent.
+      frame["listed"] = JSON::Any.new(false) unless @listed
       send_frame(frame)
     end
 
