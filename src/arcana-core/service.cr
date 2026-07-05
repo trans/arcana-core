@@ -101,6 +101,13 @@ module Arcana
       ensure
         @directory.set_busy(@address, false)
       end
+    rescue ex
+      # Guard against exceptions raised before the inner rescue (e.g.
+      # malformed payloads reaching Protocol/extract_data/check_required
+      # before the handler runs). Without this the fiber dies and the
+      # mailbox loop stops consuming — so one bad message hangs the
+      # whole service.
+      reply(envelope, Protocol.error(ex.message || "Unknown error"))
     end
 
     # Extract the data from a payload, whether it's protocol-wrapped or raw.
@@ -113,12 +120,20 @@ module Arcana
     end
 
     # Check required fields from a JSON Schema against the data.
+    # A non-hash payload counts every required field as missing, so the
+    # caller gets a Protocol.need response instead of the fiber dying
+    # on JSON::Any's "Expected Hash for #[]?(String)" error.
     private def check_required(data : JSON::Any, schema : JSON::Any) : Array(String)
       missing = [] of String
+      hash = data.as_h?
       if required = schema["required"]?.try(&.as_a?)
-        required.each do |field|
-          name = field.as_s
-          missing << name unless data[name]?
+        if hash.nil?
+          required.each { |field| missing << field.as_s }
+        else
+          required.each do |field|
+            name = field.as_s
+            missing << name unless hash[name]?
+          end
         end
       end
       missing

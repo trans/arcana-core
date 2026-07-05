@@ -207,6 +207,49 @@ describe Arcana::Service do
     json["guide"].as_s.should eq("Here's how to use me.")
   end
 
+  it "survives a poison-pill payload without killing the consumer fiber" do
+    # Regression: a payload that fails schema validation because it's not
+    # a Hash (e.g. a raw string) used to kill the service's spawn'd loop.
+    # Now it replies-need on the bad message, and the next message goes
+    # through normally.
+    bus = Arcana::Bus.new
+    dir = Arcana::Directory.new
+
+    schema = JSON.parse(%({"type":"object","required":["msg"]}))
+
+    svc = Arcana::Service.new(
+      bus: bus, directory: dir,
+      address: "test:validated",
+      name: "Validated",
+      description: "Requires msg",
+      schema: schema,
+    ) { |data| JSON::Any.new("echo: #{data["msg"].as_s}") }
+    svc.start
+
+    # Poison pill: raw string instead of {"msg": "..."}.
+    poison = bus.request(
+      Arcana::Envelope.new(
+        from: "client", to: "test:validated",
+        payload: JSON::Any.new("just a string"),
+      ),
+      timeout: 1.second,
+    )
+    poison.should_not be_nil
+    Arcana::Protocol.need?(poison.not_nil!.payload).should be_true
+
+    # Legitimate follow-up must still be consumed.
+    ok = bus.request(
+      Arcana::Envelope.new(
+        from: "client", to: "test:validated",
+        payload: JSON::Any.new({"msg" => JSON::Any.new("hi")}),
+      ),
+      timeout: 1.second,
+    )
+    ok.should_not be_nil
+    Arcana::Protocol.result?(ok.not_nil!.payload).should be_true
+    Arcana::Protocol.data(ok.not_nil!.payload).not_nil!.as_s.should eq("echo: hi")
+  end
+
   it "unregisters from directory on stop" do
     bus = Arcana::Bus.new
     dir = Arcana::Directory.new
