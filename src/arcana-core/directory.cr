@@ -4,13 +4,16 @@ module Arcana
   # Registry of agent and service capabilities.
   #
   # Address format:
-  #   - Agent: a single token, `[a-z][a-z0-9-]*` (e.g. "alice", "memo", "wow").
-  #   - Service: "owner:capability", both halves matching the agent-name pattern.
-  #     Reads possessively — "arcana:echo" means "arcana's echo service."
-  #
-  # The colon in a service address is the ground truth for service vs. agent.
-  # Internal ephemeral mailboxes (`_reply:<id>`) are carved out by a leading
-  # underscore and are neither agents nor services.
+  #   - A routing label — any single token matching `[a-z][a-z0-9-]*`, or an
+  #     `owner:capability`-style two-token form (both halves matching the
+  #     same pattern). Colons in the address are just a naming convention
+  #     now, not a type marker.
+  #   - Kind (agent vs service) and capability (chat/image/tts/...) are
+  #     explicit fields on the listing. Legacy callers that don't set them
+  #     get the old behavior: kind is derived from the address (colon =
+  #     service), and capability is the substring after the colon.
+  #   - Internal ephemeral mailboxes (`_reply:<id>`) are carved out by a
+  #     leading underscore and are neither agents nor services.
   class Directory
     NAME_PATTERN = /\A[a-z][a-z0-9-]*\z/
 
@@ -27,6 +30,8 @@ module Arcana
       property address : String
       property name : String
       property description : String
+      property kind : Kind
+      property capability : String?
       property schema : JSON::Any?
       property guide : String?
       property tags : Array(String)
@@ -35,15 +40,14 @@ module Arcana
         @address : String,
         @name : String,
         @description : String,
+        kind : Kind? = nil,
+        capability : String? = nil,
         @schema : JSON::Any? = nil,
         @guide : String? = nil,
         @tags : Array(String) = [] of String,
       )
-      end
-
-      # Derived from the address. Service if address contains a colon.
-      def kind : Kind
-        Kind.from_address(@address)
+        @kind = kind || Kind.from_address(@address)
+        @capability = capability || Directory.capability(@address)
       end
 
       def to_json(json : JSON::Builder) : Nil
@@ -51,7 +55,8 @@ module Arcana
           json.field "address", @address
           json.field "name", @name
           json.field "description", @description
-          json.field "kind", kind.to_s.downcase
+          json.field "kind", @kind.to_s.downcase
+          json.field "capability", @capability if @capability
           json.field "schema", @schema if @schema
           json.field "guide", @guide if @guide
           json.field "tags", @tags unless @tags.empty?
@@ -92,17 +97,19 @@ module Arcana
       address.partition(':').last
     end
 
-    # Validate address format. Raises if malformed.
+    # Validate address format. Raises if malformed. Accepts either a single
+    # token or an `owner:capability`-style two-token form; kind is no longer
+    # inferred here, so a colon in the address is just a naming convention.
     def self.validate_address(address : String) : Nil
       return if address.starts_with?("_reply:") # internal ephemeral
 
       if address.includes?(':')
         parts = address.split(':', 2)
-        raise Error.new("invalid service address #{address.inspect}: expected owner:capability") unless parts.size == 2
-        raise Error.new("invalid owner in #{address.inspect}: must match #{NAME_PATTERN.source}") unless parts[0] =~ NAME_PATTERN
-        raise Error.new("invalid capability in #{address.inspect}: must match #{NAME_PATTERN.source}") unless parts[1] =~ NAME_PATTERN
+        raise Error.new("invalid address #{address.inspect}: colon-form must be two tokens") unless parts.size == 2
+        raise Error.new("invalid first token in #{address.inspect}: must match #{NAME_PATTERN.source}") unless parts[0] =~ NAME_PATTERN
+        raise Error.new("invalid second token in #{address.inspect}: must match #{NAME_PATTERN.source}") unless parts[1] =~ NAME_PATTERN
       else
-        raise Error.new("invalid agent address #{address.inspect}: must match #{NAME_PATTERN.source}") unless address =~ NAME_PATTERN
+        raise Error.new("invalid address #{address.inspect}: must match #{NAME_PATTERN.source}") unless address =~ NAME_PATTERN
       end
     end
 
@@ -304,10 +311,17 @@ module Arcana
             next
           end
           next if @listings.has_key?(address)
+          kind_str = entry["kind"]?.try(&.as_s?)
+          kind = case kind_str
+                 when "service" then Kind::Service
+                 when "agent"   then Kind::Agent
+                 end
           @listings[address] = Listing.new(
             address: address,
             name: entry["name"]?.try(&.as_s?) || address,
             description: entry["description"]?.try(&.as_s?) || "",
+            kind: kind,
+            capability: entry["capability"]?.try(&.as_s?),
             schema: entry["schema"]?,
             guide: entry["guide"]?.try(&.as_s?),
             tags: entry["tags"]?.try(&.as_a?.try(&.map(&.as_s))) || [] of String,
@@ -357,6 +371,7 @@ module Arcana
         json.field "name", l.name
         json.field "description", l.description
         json.field "kind", l.kind.to_s.downcase
+        json.field "capability", l.capability if l.capability
         json.field "busy", @busy[l.address]? || false
         json.field "schema", l.schema if l.schema
         json.field "guide", l.guide if l.guide

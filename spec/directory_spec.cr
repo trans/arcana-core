@@ -59,10 +59,10 @@ describe Arcana::Directory do
       Arcana::Directory.validate_address("sre-team:monitoring")
       Arcana::Directory.validate_address("_reply:deadbeef")
 
-      expect_raises(Arcana::Error, /invalid agent/) { Arcana::Directory.validate_address("Alice") }
-      expect_raises(Arcana::Error, /invalid agent/) { Arcana::Directory.validate_address("123go") }
-      expect_raises(Arcana::Error, /invalid capability/) { Arcana::Directory.validate_address("a:b:c") }
-      expect_raises(Arcana::Error, /invalid capability/) { Arcana::Directory.validate_address("openai:CHAT") }
+      expect_raises(Arcana::Error, /invalid address/) { Arcana::Directory.validate_address("Alice") }
+      expect_raises(Arcana::Error, /invalid address/) { Arcana::Directory.validate_address("123go") }
+      expect_raises(Arcana::Error, /invalid.*token/) { Arcana::Directory.validate_address("a:b:c") }
+      expect_raises(Arcana::Error, /invalid.*token/) { Arcana::Directory.validate_address("openai:CHAT") }
     end
   end
 
@@ -199,6 +199,30 @@ describe Arcana::Directory do
       parsed[0]["address"].as_s.should eq("a")
       parsed[0]["kind"].as_s.should eq("agent")
       parsed[0]["tags"].as_a.map(&.as_s).should eq(["tag1"])
+    end
+
+    it "includes capability when set" do
+      dir = Arcana::Directory.new
+      dir.register(Arcana::Directory::Listing.new(
+        address: "openai-chat", name: "OpenAI Chat", description: "chats",
+        kind: Arcana::Directory::Kind::Service,
+        capability: "chat",
+      ))
+
+      parsed = JSON.parse(dir.to_json)
+      parsed[0]["kind"].as_s.should eq("service")
+      parsed[0]["capability"].as_s.should eq("chat")
+    end
+
+    it "omits capability for agent listings" do
+      dir = Arcana::Directory.new
+      dir.register(Arcana::Directory::Listing.new(
+        address: "cattacula", name: "cattacula", description: "an agent",
+      ))
+
+      parsed = JSON.parse(dir.to_json)
+      parsed[0]["kind"].as_s.should eq("agent")
+      parsed[0]["capability"]?.should be_nil
     end
   end
 

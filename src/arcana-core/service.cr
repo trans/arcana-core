@@ -28,12 +28,12 @@ module Arcana
       @address : String,
       @name : String,
       @description : String,
+      @capability : String? = nil,
       @schema : JSON::Any? = nil,
       @guide : String? = nil,
       @tags : Array(String) = [] of String,
       &handler : JSON::Any -> JSON::Any
     )
-      raise Error.new("Service address must be owner:capability, got #{@address.inspect}") unless Directory.service?(@address)
       Directory.validate_address(@address)
       @handler = handler
       @running = false
@@ -42,6 +42,8 @@ module Arcana
         address: @address,
         name: @name,
         description: @description,
+        kind: Directory::Kind::Service,
+        capability: @capability,
         schema: @schema,
         guide: @guide,
         tags: @tags,

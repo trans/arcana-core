@@ -17,17 +17,37 @@ describe Arcana::Service do
     listing.not_nil!.kind.should eq(Arcana::Directory::Kind::Service)
   end
 
-  it "rejects bare (agent-style) addresses" do
+  it "accepts single-token addresses (kind + capability are explicit)" do
     bus = Arcana::Bus.new
     dir = Arcana::Directory.new
-    expect_raises(Arcana::Error, /must be owner:capability/) do
-      Arcana::Service.new(
-        bus: bus, directory: dir,
-        address: "bare",
-        name: "Nope",
-        description: "won't work",
-      ) { |d| d }
-    end
+
+    Arcana::Service.new(
+      bus: bus, directory: dir,
+      address: "converter",
+      name: "Converter",
+      description: "converts things",
+      capability: "convert",
+    ) { |d| d }
+
+    listing = dir.lookup("converter").not_nil!
+    listing.kind.should eq(Arcana::Directory::Kind::Service)
+    listing.capability.should eq("convert")
+  end
+
+  it "keeps deriving capability from the address when not passed explicitly" do
+    bus = Arcana::Bus.new
+    dir = Arcana::Directory.new
+
+    Arcana::Service.new(
+      bus: bus, directory: dir,
+      address: "openai:chat",
+      name: "OpenAI Chat",
+      description: "backward compat",
+    ) { |d| d }
+
+    listing = dir.lookup("openai:chat").not_nil!
+    listing.kind.should eq(Arcana::Directory::Kind::Service)
+    listing.capability.should eq("chat")
   end
 
   it "handles requests and returns results" do
