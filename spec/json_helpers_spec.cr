@@ -13,127 +13,127 @@ describe "JSON::Any helpers" do
   }))
 
   describe "str? / str" do
-    it "extracts string values" do
+    it "str? returns nullable value" do
       data.str?("name").should eq("Alice")
-      data.str("name").should eq("Alice")
-    end
-
-    it "returns nil for missing keys" do
       data.str?("missing").should be_nil
+      data.str?("age").should be_nil # wrong type
     end
 
-    it "returns nil for wrong types" do
-      data.str?("age").should be_nil
+    it "str returns \"\" by default when missing" do
+      data.str("name").should eq("Alice")
+      data.str("missing").should eq("")
+      data.str("age").should eq("") # wrong type also uses default
     end
 
-    it "returns default when missing" do
-      data.str?("missing", "fallback").should eq("fallback")
-    end
-
-    it "raises for missing key" do
-      expect_raises(Arcana::Error, /missing or non-string/) { data.str("missing") }
-    end
-
-    it "raises for wrong type" do
-      expect_raises(Arcana::Error, /missing or non-string/) { data.str("age") }
+    it "str accepts an explicit default" do
+      data.str("missing", "fallback").should eq("fallback")
     end
   end
 
   describe "int? / int" do
-    it "extracts int values" do
-      data.int("age").should eq(30)
+    it "int? returns nullable value" do
       data.int?("age").should eq(30)
+      data.int?("missing").should be_nil
     end
 
-    it "returns default when missing" do
-      data.int?("missing", 42).should eq(42)
+    it "int returns 0 by default when missing" do
+      data.int("age").should eq(30)
+      data.int("missing").should eq(0)
     end
 
-    it "handles int64 values that fit in int32" do
+    it "int accepts an explicit default" do
+      data.int("missing", 42).should eq(42)
+    end
+
+    it "handles int-valued numbers correctly" do
       short = JSON.parse(%({"n": 5}))
       short.int("n").should eq(5)
-    end
-
-    it "raises for wrong type" do
-      expect_raises(Arcana::Error) { data.int("name") }
     end
   end
 
   describe "i64? / i64" do
-    it "extracts int64 values" do
+    it "i64 handles int64 values" do
       data.i64("count64").should eq(9999999999_i64)
     end
 
-    it "returns default when missing" do
-      data.i64?("missing", 100_i64).should eq(100_i64)
+    it "i64 default is 0_i64" do
+      data.i64("missing").should eq(0_i64)
+    end
+
+    it "i64 accepts an explicit default" do
+      data.i64("missing", 100_i64).should eq(100_i64)
     end
   end
 
   describe "float? / float" do
-    it "extracts float values" do
+    it "float returns 0.0 by default" do
       data.float("score").should eq(3.14)
+      data.float("missing").should eq(0.0)
     end
 
-    it "coerces ints to floats" do
+    it "float coerces ints" do
       data.float("age").should eq(30.0)
     end
 
-    it "returns default when missing" do
-      data.float?("missing", 1.0).should eq(1.0)
+    it "float accepts an explicit default" do
+      data.float("missing", 1.5).should eq(1.5)
     end
   end
 
   describe "bool? / bool" do
-    it "extracts bool values" do
-      data.bool("active").should be_true
+    it "bool? returns nullable value" do
       data.bool?("active").should be_true
-    end
-
-    it "returns nil for missing keys" do
       data.bool?("missing").should be_nil
     end
 
-    it "returns default when missing" do
-      data.bool?("missing", false).should be_false
+    it "bool returns false by default" do
+      data.bool("active").should be_true
+      data.bool("missing").should be_false
     end
 
-    it "distinguishes explicit false from missing" do
+    it "bool preserves explicit false over default" do
       d = JSON.parse(%({"flag": false}))
-      d.bool?("flag", true).should be_false
+      d.bool("flag", true).should be_false
     end
   end
 
   describe "arr? / arr" do
-    it "extracts array values" do
+    it "arr? returns nullable" do
       data.arr("tags").size.should eq(3)
+      data.arr?("missing").should be_nil
     end
 
-    it "returns nil for missing keys" do
-      data.arr?("missing").should be_nil
+    it "arr defaults to empty array" do
+      data.arr("missing").should eq([] of JSON::Any)
     end
   end
 
   describe "obj? / obj" do
-    it "extracts hash values" do
-      data.obj("nested")["k"].as_s.should eq("v")
+    it "obj? returns nullable" do
+      data.obj?("nested").not_nil!["k"].as_s.should eq("v")
+      data.obj?("missing").should be_nil
     end
 
-    it "returns nil for missing keys" do
-      data.obj?("missing").should be_nil
+    it "obj defaults to empty hash" do
+      data.obj("missing").should eq({} of String => JSON::Any)
     end
   end
 
   describe "str_arr? / str_arr" do
-    it "extracts array of strings" do
+    it "str_arr extracts array of strings" do
       data.str_arr("tags").should eq(["a", "b", "c"])
     end
 
-    it "skips non-string entries" do
-      data.str_arr?("mixed_tags").should eq(["a", "b"])
+    it "str_arr skips non-string entries" do
+      data.str_arr("mixed_tags").should eq(["a", "b"])
     end
 
-    it "returns default when missing" do
-      data.str_arr?("missing", ["x"]).should eq(["x"])
+    it "str_arr defaults to empty" do
+      data.str_arr("missing").should eq([] of String)
+    end
+
+    it "str_arr accepts an explicit default" do
+      data.str_arr("missing", ["x"]).should eq(["x"])
     end
   end
 end
