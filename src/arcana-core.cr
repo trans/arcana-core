@@ -1,4 +1,5 @@
 require "./arcana-core/error"
+require "./arcana-core/json_helpers"
 require "./arcana-core/envelope"
 require "./arcana-core/protocol"
 require "./arcana-core/directory"
@@ -11,6 +12,6 @@ require "./arcana-core/state_backend"
 
 module Arcana
   module Core
-    VERSION = "0.6.0"
+    VERSION = "0.7.0"
   end
 end
