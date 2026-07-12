@@ -3,11 +3,10 @@ require "./spec_helper"
 describe Arcana::Protocol do
   describe ".request" do
     it "wraps data with protocol metadata" do
-      payload = Arcana::Protocol.request(JSON::Any.new("hello"), intent: "greet")
+      payload = Arcana::Protocol.request(JSON::Any.new("hello"))
       Arcana::Protocol.proto?(payload).should be_true
       Arcana::Protocol.request?(payload).should be_true
       Arcana::Protocol.data(payload).not_nil!.as_s.should eq("hello")
-      Arcana::Protocol.intent(payload).should eq("greet")
     end
   end
 

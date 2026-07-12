@@ -173,16 +173,21 @@ describe Arcana::Service do
     ) { |_data| JSON::Any.new("ok") }
     svc.start
 
-    payload = Arcana::Protocol.request(JSON::Any.new(nil), intent: "help")
+    # Post-0.8: help is a tool. Send {"tool":"help"} — service replies
+    # with a Protocol.result whose data contains the guide + inputSchema.
+    payload = Arcana::Protocol.request(
+      JSON::Any.new({"tool" => JSON::Any.new("help")}),
+    )
     result = bus.request(
       Arcana::Envelope.new(from: "client", to: "test:imager", payload: payload),
       timeout: 1.second,
     )
 
     result.should_not be_nil
-    Arcana::Protocol.help?(result.not_nil!.payload).should be_true
-    Arcana::Protocol.guide(result.not_nil!.payload).should eq("Send a prompt to generate an image. Width defaults to 1024. Use short, descriptive prompts for best results.")
-    result.not_nil!.payload["schema"]["required"].as_a.map(&.as_s).should eq(["prompt"])
+    Arcana::Protocol.result?(result.not_nil!.payload).should be_true
+    data = Arcana::Protocol.data(result.not_nil!.payload).not_nil!
+    data["guide"].as_s.should eq("Send a prompt to generate an image. Width defaults to 1024. Use short, descriptive prompts for best results.")
+    data["inputSchema"]["required"].as_a.map(&.as_s).should eq(["prompt"])
   end
 
   it "falls back to description when no guide is set" do
@@ -197,14 +202,17 @@ describe Arcana::Service do
     ) { |data| data }
     svc.start
 
-    payload = Arcana::Protocol.request(JSON::Any.new(nil), intent: "help")
+    payload = Arcana::Protocol.request(
+      JSON::Any.new({"tool" => JSON::Any.new("help")}),
+    )
     result = bus.request(
       Arcana::Envelope.new(from: "client", to: "test:simple", payload: payload),
       timeout: 1.second,
     )
 
     result.should_not be_nil
-    Arcana::Protocol.guide(result.not_nil!.payload).should eq("A simple service")
+    data = Arcana::Protocol.data(result.not_nil!.payload).not_nil!
+    data["guide"].as_s.should eq("A simple service")
   end
 
   it "includes guide in directory listing" do

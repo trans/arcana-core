@@ -13,14 +13,18 @@ module Arcana
   #   2. Recipient replies with `result`, `need`, or `error`
   #   3. If `need`, sender provides more info and goto 2
   #
+  # Discovery: send a `{"tool": "help"}` payload (or a Protocol.request
+  # wrapping one) to any address to get its capabilities. Services
+  # auto-respond via Arcana::Service's help handler; Toolsets return a
+  # tools manifest via their auto-registered `help` tool.
+  #
   module Protocol
     VERSION = "arcana/1"
 
     # Wrap data as a request payload.
-    def self.request(data : JSON::Any, intent : String = "") : JSON::Any
+    def self.request(data : JSON::Any) : JSON::Any
       h = base("request")
       h["data"] = data
-      h["_intent"] = JSON::Any.new(intent) unless intent.empty?
       JSON::Any.new(h)
     end
 
@@ -44,14 +48,6 @@ module Arcana
         h["questions"] = JSON::Any.new(qs.map { |q| JSON::Any.new(q) })
       end
       h["_message"] = JSON::Any.new(message) if message
-      JSON::Any.new(h)
-    end
-
-    # Respond with a how-to guide.
-    def self.help(guide : String, schema : JSON::Any? = nil) : JSON::Any
-      h = base("help")
-      h["guide"] = JSON::Any.new(guide)
-      h["schema"] = schema if schema
       JSON::Any.new(h)
     end
 
@@ -87,11 +83,6 @@ module Arcana
       payload.as_h?.try(&.["_message"]?).try(&.as_s?)
     end
 
-    # Extract the intent field (for requests).
-    def self.intent(payload : JSON::Any) : String?
-      payload.as_h?.try(&.["_intent"]?).try(&.as_s?)
-    end
-
     def self.result?(payload : JSON::Any) : Bool
       status(payload) == "result"
     end
@@ -106,15 +97,6 @@ module Arcana
 
     def self.request?(payload : JSON::Any) : Bool
       status(payload) == "request"
-    end
-
-    def self.help?(payload : JSON::Any) : Bool
-      status(payload) == "help"
-    end
-
-    # Extract the guide text from a help response.
-    def self.guide(payload : JSON::Any) : String?
-      payload.as_h?.try(&.["guide"]?).try(&.as_s?)
     end
 
     private def self.base(status : String) : Hash(String, JSON::Any)

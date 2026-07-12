@@ -20,43 +20,55 @@ require "json"
 # same names later, we'll rename.
 struct JSON::Any
   # --- nullable-return variants (?) ---
+  #
+  # If `self` isn't a JSON object (Hash), every helper returns nil.
+  # That way callers can probe payloads without a defensive
+  # `data.as_h? ||` guard at every site — a raw String or Nil payload
+  # answers "no such field" for anything you ask for.
 
   def str?(key : String) : String?
+    return nil unless as_h?
     self[key]?.try(&.as_s?)
   end
 
   def int?(key : String) : Int32?
+    return nil unless as_h?
     v = self[key]?
     return nil if v.nil?
     v.as_i? || v.as_i64?.try(&.to_i32)
   end
 
   def i64?(key : String) : Int64?
+    return nil unless as_h?
     v = self[key]?
     return nil if v.nil?
     v.as_i64? || v.as_i?.try(&.to_i64)
   end
 
   def float?(key : String) : Float64?
+    return nil unless as_h?
     v = self[key]?
     return nil if v.nil?
     v.as_f? || v.as_i?.try(&.to_f64)
   end
 
   def bool?(key : String) : Bool?
+    return nil unless as_h?
     self[key]?.try(&.as_bool?)
   end
 
   def arr?(key : String) : Array(JSON::Any)?
+    return nil unless as_h?
     self[key]?.try(&.as_a?)
   end
 
   def obj?(key : String) : Hash(String, JSON::Any)?
+    return nil unless as_h?
     self[key]?.try(&.as_h?)
   end
 
   # Return an Array(String), skipping non-string entries. Nil when
-  # the field is missing or not an array.
+  # the field is missing, self isn't a hash, or the value isn't an array.
   def str_arr?(key : String) : Array(String)?
     arr?(key).try(&.compact_map(&.as_s?))
   end

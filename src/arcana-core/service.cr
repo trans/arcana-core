@@ -72,14 +72,21 @@ module Arcana
     end
 
     private def handle(envelope : Envelope)
-      # Respond to help requests with the guide.
-      if Protocol.proto?(envelope.payload) && Protocol.intent(envelope.payload) == "help"
+      data = extract_data(envelope.payload)
+
+      # Respond to `{"tool":"help"}` with the service's guide + schema
+      # wrapped as a normal result. Single-purpose services present one
+      # "tool" (themselves); Toolset providers override this with a rich
+      # multi-tool manifest.
+      if data.str?("tool") == "help"
         guide_text = @guide || @description
-        reply(envelope, Protocol.help(guide_text, schema: @schema))
+        manifest = {
+          "guide" => JSON::Any.new(guide_text),
+        } of String => JSON::Any
+        manifest["inputSchema"] = @schema.not_nil! if @schema
+        reply(envelope, Protocol.result(JSON::Any.new(manifest)))
         return
       end
-
-      data = extract_data(envelope.payload)
 
       # Validate against schema if present
       if schema = @schema
