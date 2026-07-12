@@ -8,28 +8,41 @@ module Arcana
   # address. For a single-purpose service (echo, markdown, one chat
   # endpoint), use `Arcana::Service` directly.
   #
-  #   ts = Arcana::Toolset.new(
-  #     bus: bus, directory: dir,
-  #     address: "mj",
-  #     name: "Minanime",
-  #     description: "Image generation studio",
-  #     capability: "image",
-  #     tags: ["image", "generation"],
-  #   )
+  # **Two transports.**
   #
-  #   ts.tool("pixelize",
-  #     description: "Pixel-art stylization for a reference image",
-  #     input_schema: JSON.parse(%({"type":"object","required":["prompt"]}))
-  #   ) do |data|
-  #     img = MyEngine.pixelize(prompt: data.str("prompt"))
-  #     JSON::Any.new({"image_base64" => JSON::Any.new(img)})
-  #   end
+  # 1. In-process (Bus + Directory) — for tools registered inside the
+  #    arcana daemon itself:
   #
-  #   ts.tool("prop", description: "...") { |data| ... }
+  #      ts = Arcana::Toolset.new(
+  #        bus: bus, directory: dir,
+  #        address: "arcana:markdown",
+  #        name: "Markdown", description: "Converts markdown to HTML/ANSI",
+  #        capability: "markdown",
+  #      )
+  #      ts.tool("to_html", ...) { |data| ... }
+  #      ts.start
   #
-  #   ts.start
+  # 2. Over a WebSocket Client — for a separate process (your Kemal
+  #    app, mj, etc.) exposing tools on the daemon's bus:
   #
-  # Callers:
+  #      client = Arcana::Client.new(
+  #        url: "ws://localhost:19118/bus",
+  #        address: "mj", name: "Minanime",
+  #        description: "Image generation studio",
+  #        kind: Arcana::Directory::Kind::Service,
+  #        capability: "image", tags: ["image"],
+  #      )
+  #      ts = Arcana::Toolset.new(client: client)
+  #      ts.tool("pixelize", "Pixel-art stylize", input_schema: ...) do |data|
+  #        JSON::Any.new({"image_base64" => ...})
+  #      end
+  #      ts.start
+  #      client.connect  # blocks — WebSocket receive loop
+  #
+  # Same tool-registration API, same manifest shape, same dispatch. The
+  # transport is the only thing that differs.
+  #
+  # Callers (from any transport):
   #   deliver to:"mj" payload:{"tool":"help"}
   #   → {"tools":[{"name":"pixelize","description":"...","inputSchema":{...}}, ...]}
   #
@@ -57,9 +70,16 @@ module Arcana
 
     getter address : String
 
+    @bus : Bus?
+    @directory : Directory?
+    @mailbox : Mailbox?
+    @client : Client?
+
+    # In-process constructor: registers a listing on `directory` and
+    # reads envelopes from a `Bus` mailbox.
     def initialize(
-      @bus : Bus,
-      @directory : Directory,
+      bus : Bus,
+      directory : Directory,
       @address : String,
       @name : String,
       @description : String,
@@ -67,10 +87,13 @@ module Arcana
       @tags : Array(String) = [] of String,
     )
       Directory.validate_address(@address)
+      @bus = bus
+      @directory = directory
+      @client = nil
       @tools = {} of String => Tool
       @running = false
 
-      @directory.register(Directory::Listing.new(
+      directory.register(Directory::Listing.new(
         address: @address,
         name: @name,
         description: @description,
@@ -79,7 +102,34 @@ module Arcana
         tags: @tags,
       ))
 
-      @mailbox = @bus.mailbox(@address)
+      @mailbox = bus.mailbox(@address)
+    end
+
+    # Client-transport constructor: wraps a `Client` (already
+    # configured with address/name/kind/capability). Envelopes flow
+    # over the Client's WebSocket. The daemon's Directory is populated
+    # by the Client's join frame — this constructor does not register
+    # a listing itself.
+    #
+    # `name:` and `description:` are optional overrides for the tools
+    # manifest header; if omitted, the client's own name/description
+    # are used.
+    def initialize(
+      client : Client,
+      name : String? = nil,
+      description : String? = nil,
+    )
+      @client = client
+      @address = client.address
+      @bus = nil
+      @directory = nil
+      @mailbox = nil
+      @name = name || client.name || client.address
+      @description = description || client.description || ""
+      @capability = nil
+      @tags = [] of String
+      @tools = {} of String => Tool
+      @running = false
     end
 
     # Register a tool. Add all tools before calling `start`.
@@ -93,7 +143,7 @@ module Arcana
       @tools[name] = Tool.new(name, description, input_schema, handler)
     end
 
-    # Return the tool manifest. Useful for tests and MCP bridging.
+    # Return the tool manifest.
     def manifest : JSON::Any
       JSON::Any.new({
         "name"        => JSON::Any.new(@name),
@@ -102,57 +152,63 @@ module Arcana
       } of String => JSON::Any)
     end
 
-    # Start listening for requests. Spawns a fiber.
+    # Start listening for envelopes. On Bus transport, spawns a fiber
+    # reading from the mailbox. On Client transport, registers an
+    # on_message handler — the caller still owns Client#connect (which
+    # blocks running the WebSocket loop).
     def start
       return if @running
       @running = true
 
-      spawn do
-        while @running
-          envelope = @mailbox.receive
-          handle(envelope)
+      if mb = @mailbox
+        spawn do
+          while @running
+            envelope = mb.receive
+            dispatch(envelope)
+          end
+        end
+      elsif c = @client
+        c.on_message do |envelope|
+          dispatch(envelope)
         end
       end
     end
 
-    # Stop the toolset. Finishes the current request.
+    # Stop the toolset. In Bus mode, unregisters and drops the read
+    # loop. In Client mode, this just flips a flag — the caller closes
+    # the Client separately.
     def stop
       @running = false
-      @directory.unregister(@address)
+      dir = @directory
+      dir.unregister(@address) if dir
     end
 
-    private def handle(envelope : Envelope)
+    private def dispatch(envelope : Envelope)
       data = extract_data(envelope.payload)
       tool_name = data.str?("tool")
 
-      if tool_name.nil? || tool_name.empty?
-        reply(envelope, Protocol.error("payload missing 'tool' field. Send {\"tool\":\"help\"} for available tools."))
-        return
-      end
+      reply_payload =
+        if tool_name.nil? || tool_name.empty?
+          Protocol.error("payload missing 'tool' field. Send {\"tool\":\"help\"} for available tools.")
+        elsif tool_name == "help"
+          Protocol.result(manifest)
+        elsif tool_entry = @tools[tool_name]?
+          begin
+            @directory.try &.set_busy(@address, true)
+            Protocol.result(tool_entry.handler.call(data))
+          rescue ex
+            Protocol.error(ex.message || "handler crashed")
+          ensure
+            @directory.try &.set_busy(@address, false)
+          end
+        else
+          known = @tools.keys.sort.join(", ")
+          Protocol.error("unknown tool #{tool_name.inspect}. Known: #{known}. Send {\"tool\":\"help\"} for schemas.")
+        end
 
-      if tool_name == "help"
-        reply(envelope, Protocol.result(manifest))
-        return
-      end
-
-      tool = @tools[tool_name]?
-      unless tool
-        known = @tools.keys.sort.join(", ")
-        reply(envelope, Protocol.error("unknown tool #{tool_name.inspect}. Known: #{known}. Send {\"tool\":\"help\"} for schemas."))
-        return
-      end
-
-      begin
-        @directory.set_busy(@address, true)
-        result = tool.handler.call(data)
-        reply(envelope, Protocol.result(result))
-      rescue ex
-        reply(envelope, Protocol.error(ex.message || "handler crashed"))
-      ensure
-        @directory.set_busy(@address, false)
-      end
+      send_reply(envelope, reply_payload)
     rescue ex
-      reply(envelope, Protocol.error(ex.message || "Unknown error"))
+      send_reply(envelope, Protocol.error(ex.message || "Unknown error"))
     end
 
     private def extract_data(payload : JSON::Any) : JSON::Any
@@ -163,19 +219,22 @@ module Arcana
       end
     end
 
-    private def reply(envelope : Envelope, payload : JSON::Any)
-      if reply_to = envelope.reply_to
-        @bus.send?(Envelope.new(
-          from: @address, to: reply_to,
-          subject: envelope.subject, payload: payload,
-          correlation_id: envelope.correlation_id,
-        ))
-      elsif !envelope.from.empty?
-        @bus.send?(Envelope.new(
-          from: @address, to: envelope.from,
-          subject: envelope.subject, payload: payload,
-          correlation_id: envelope.correlation_id,
-        ))
+    private def send_reply(envelope : Envelope, payload : JSON::Any) : Nil
+      destination = envelope.reply_to || envelope.from
+      return if destination.empty?
+
+      reply_env = Envelope.new(
+        from: @address,
+        to: destination,
+        subject: envelope.subject,
+        payload: payload,
+        correlation_id: envelope.correlation_id,
+      )
+
+      if b = @bus
+        b.send?(reply_env)
+      elsif c = @client
+        c.send(reply_env)
       end
     end
   end

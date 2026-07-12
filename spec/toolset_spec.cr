@@ -137,6 +137,49 @@ describe Arcana::Toolset do
     end
   end
 
+  describe "over a Client transport" do
+    it "wraps a Client and exposes the same tool API" do
+      # Build a fake mailbox-like bus we won't actually use — we just
+      # want to construct the Client with an address and hand it to
+      # Toolset.new(client:). Since Client only exposes getters (no
+      # networking until .connect), we can verify identity + tool API
+      # without a live WebSocket.
+      client = Arcana::Client.new(
+        url: "ws://localhost:19118/bus",
+        address: "mj",
+        name: "Minanime",
+        description: "Image generation studio",
+        kind: Arcana::Directory::Kind::Service,
+        capability: "image",
+      )
+      ts = Arcana::Toolset.new(client: client)
+      ts.tool("pixelize", "Pixel-art stylize") { |_| JSON::Any.new("ok") }
+
+      ts.address.should eq("mj")
+
+      manifest = ts.manifest
+      manifest["name"].as_s.should eq("Minanime")
+      manifest["description"].as_s.should eq("Image generation studio")
+      manifest["tools"].as_a.size.should eq(1)
+      manifest["tools"].as_a[0]["name"].as_s.should eq("pixelize")
+    end
+
+    it "manifest name/description override client's" do
+      client = Arcana::Client.new(
+        url: "ws://localhost:19118/bus",
+        address: "mj",
+        name: "Minanime",
+        description: "studio",
+      )
+      ts = Arcana::Toolset.new(client: client, name: "Custom", description: "override")
+      ts.tool("noop", "no-op") { |_| JSON::Any.new("ok") }
+
+      manifest = ts.manifest
+      manifest["name"].as_s.should eq("Custom")
+      manifest["description"].as_s.should eq("override")
+    end
+  end
+
   it "survives a poison-pill payload (non-hash) without killing the fiber" do
     bus = Arcana::Bus.new
     dir = Arcana::Directory.new

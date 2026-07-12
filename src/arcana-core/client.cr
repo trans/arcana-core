@@ -47,6 +47,10 @@ module Arcana
       @address : String,
       @name : String? = nil,
       @description : String? = nil,
+      @kind : Directory::Kind? = nil,
+      @capability : String? = nil,
+      @guide : String? = nil,
+      @schema : JSON::Any? = nil,
       @tags : Array(String) = [] of String,
       @listed : Bool = true,
     )
@@ -54,10 +58,22 @@ module Arcana
       Directory.validate_address(@address)
     end
 
-    # Is this client registered as a service (vs. an agent)?
+    # Is this client registered as a service (vs. an agent)? If kind was
+    # set explicitly at construction, use that; otherwise fall back to
+    # the address-syntax guess.
     def service? : Bool
+      k = @kind
+      return k == Directory::Kind::Service if k
       Directory.service?(@address)
     end
+
+    # Identity readers (Toolset reads these when constructed over Client).
+    getter address : String
+    getter name : String?
+    getter description : String?
+    getter capability : String?
+    getter guide : String?
+    getter kind : Directory::Kind?
 
     # Register a handler for incoming envelopes. Set before calling `connect`.
     def on_message(&block : Envelope -> Nil)
@@ -165,6 +181,18 @@ module Arcana
       end
       if description = @description
         frame["description"] = JSON::Any.new(description)
+      end
+      if k = @kind
+        frame["kind"] = JSON::Any.new(k.to_s.downcase)
+      end
+      if capability = @capability
+        frame["capability"] = JSON::Any.new(capability)
+      end
+      if guide = @guide
+        frame["guide"] = JSON::Any.new(guide)
+      end
+      if schema = @schema
+        frame["schema"] = schema
       end
       unless @tags.empty?
         frame["tags"] = JSON::Any.new(@tags.map { |t| JSON::Any.new(t) })
