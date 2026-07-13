@@ -153,21 +153,43 @@ module Arcana
     # Remove agent listings older than `ttl`. Services are never pruned
     # (they get re-registered from code on each startup anyway).
     # Returns the list of pruned addresses.
+    #
+    # The walk collects candidates under the mutex, releases it, then
+    # re-acquires briefly per-address for each delete. Each delete
+    # re-verifies staleness — a re-registration between the walk and
+    # the delete is respected. Keeps every mutex acquisition O(1),
+    # so registration/lookup can slip through even during a large
+    # prune sweep.
     def prune_stale_agents(ttl : Time::Span) : Array(String)
       cutoff = Time.utc - ttl
-      pruned = [] of String
-      @mutex.synchronize do
-        @listings.each do |addr, _|
+
+      candidates = @mutex.synchronize do
+        result = [] of String
+        @listings.each_key do |addr|
           next unless Directory.agent?(addr)
           ts = @last_seen[addr]? || Time.utc
-          pruned << addr if ts < cutoff
+          result << addr if ts < cutoff
         end
-        pruned.each do |addr|
-          @listings.delete(addr)
-          @busy.delete(addr)
-          @last_seen.delete(addr)
-        end
+        result
       end
+
+      pruned = [] of String
+      candidates.each do |addr|
+        removed = @mutex.synchronize do
+          # Re-verify — a register may have happened between walk and delete.
+          ts = @last_seen[addr]?
+          if ts && ts < cutoff && Directory.agent?(addr) && @listings.has_key?(addr)
+            @listings.delete(addr)
+            @busy.delete(addr)
+            @last_seen.delete(addr)
+            true
+          else
+            false
+          end
+        end
+        pruned << addr if removed
+      end
+
       if (recorder = @events) && !pruned.empty?
         pruned.each do |addr|
           recorder.record(Events::Event.new(type: "listing.pruned", subject: addr))

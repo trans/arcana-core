@@ -20,6 +20,13 @@ module Arcana
     @subscriptions = {} of String => Set(String)
     @mutex = Mutex.new
     property directory : Directory?
+
+    # Default max queue length for newly created mailboxes. `nil` means
+    # unbounded (the historical default). Set via bin/arcana.cr from
+    # ARCANA_MAILBOX_MAX_QUEUE. Mailboxes created with an explicit
+    # `max_queue:` via a custom `mailbox_factory` override this.
+    property default_max_queue : Int32? = nil
+
     property mailbox_factory : MailboxFactory = ->(address : String) { Mailbox.new(address).as(Mailbox) }
 
     # Optional event recorder. When set, material bus actions (sends,
@@ -31,7 +38,15 @@ module Arcana
     # Get or create a mailbox for an address.
     def mailbox(address : String) : Mailbox
       @mutex.synchronize do
-        mb = @mailboxes[address] ||= @mailbox_factory.call(address)
+        mb = @mailboxes[address]?
+        unless mb
+          mb = @mailbox_factory.call(address)
+          # If the factory didn't set a bound, apply the bus-wide default.
+          if mb.max_queue.nil? && (default = @default_max_queue)
+            mb = Mailbox.new(address, max_queue: default)
+          end
+          @mailboxes[address] = mb
+        end
         if mb.on_activity.nil?
           mb.on_activity = ->(addr : String) {
             @directory.try(&.touch(addr))
@@ -94,23 +109,50 @@ module Arcana
 
     # -- Direct delivery --
 
-    # Send an envelope to its `to` address.
+    # Send an envelope to its `to` address. Raises if no mailbox exists,
+    # or `MailboxFull` if the recipient's queue is at capacity.
     def send(envelope : Envelope)
       mb = @mutex.synchronize { @mailboxes[envelope.to]? }
       raise Error.new("No mailbox for address: #{envelope.to}") unless mb
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
-      mb.deliver(envelope)
+      begin
+        mb.deliver(envelope)
+      rescue ex : MailboxFull
+        record_rejected(envelope, "mailbox_full")
+        raise ex
+      end
       record_send(envelope)
     end
 
-    # Send, but silently drop if the target mailbox doesn't exist.
+    # Send, but return false instead of raising when the target mailbox
+    # doesn't exist OR is full. Backpressure and missing-address both
+    # collapse to "message didn't land" — callers who want to distinguish
+    # should use `send` and catch specific errors.
     def send?(envelope : Envelope) : Bool
       mb = @mutex.synchronize { @mailboxes[envelope.to]? }
       return false unless mb
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
-      mb.deliver(envelope)
+      begin
+        mb.deliver(envelope)
+      rescue MailboxFull
+        record_rejected(envelope, "mailbox_full")
+        return false
+      end
       record_send(envelope)
       true
+    end
+
+    private def record_rejected(envelope : Envelope, reason : String)
+      @events.try &.record(Events::Event.new(
+        type: "message.rejected",
+        subject: envelope.to,
+        object: (envelope.from.empty? ? nil : envelope.from),
+        correlation_id: envelope.correlation_id,
+        metadata: {
+          "reason"  => JSON::Any.new(reason),
+          "subject" => JSON::Any.new(envelope.subject),
+        } of String => JSON::Any,
+      ))
     end
 
     private def record_send(envelope : Envelope)

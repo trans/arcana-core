@@ -1,16 +1,33 @@
 module Arcana
+  # Raised when a bounded mailbox rejects a deliver because the queue
+  # is at capacity. Bus surfaces this to the sender (delivery fails
+  # loudly instead of a silent memory leak from an unbounded queue).
+  class MailboxFull < Error
+    getter address : String
+    getter max_queue : Int32
+
+    def initialize(@address : String, @max_queue : Int32)
+      super("mailbox for '#{@address}' is full (#{@max_queue} messages queued)")
+    end
+  end
+
   # A buffered inbox for a single agent address.
   #
   # Backed by a Deque (not a Channel) so messages can be inspected
   # without consuming them and selectively received by id.
+  #
+  # Optionally bounded: pass `max_queue:` to reject deliveries with
+  # `MailboxFull` when the queue reaches capacity. Unbounded by
+  # default — the daemon sets a global default via ARCANA_MAILBOX_MAX_QUEUE.
   class Mailbox
     getter address : String
+    getter max_queue : Int32?
 
     # Optional callback invoked on any activity (deliver, receive).
     # Used by Bus to refresh Directory last_seen.
     property on_activity : Proc(String, Nil)? = nil
 
-    def initialize(@address : String)
+    def initialize(@address : String, @max_queue : Int32? = nil)
       @messages = Deque(Envelope).new
       @mutex = Mutex.new
       @signal = Channel(Nil).new(1) # buffered signal for wake-ups
@@ -41,9 +58,13 @@ module Arcana
       @mutex.synchronize { @messages.size }
     end
 
-    # Deliver an envelope to this mailbox.
+    # Deliver an envelope to this mailbox. Raises `MailboxFull` when
+    # `max_queue` is set and the queue is at capacity.
     def deliver(envelope : Envelope)
       @mutex.synchronize do
+        if max = @max_queue
+          raise MailboxFull.new(@address, max) if @messages.size >= max
+        end
         @messages.push(envelope)
         @last_activity = Time.utc
       end

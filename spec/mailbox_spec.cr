@@ -259,4 +259,37 @@ describe Arcana::Mailbox do
       listing[0][:frozen_by].should eq("supervisor")
     end
   end
+
+  describe "bounded queue (max_queue)" do
+    it "accepts up to max_queue messages" do
+      mb = Arcana::Mailbox.new("bob", max_queue: 3)
+      3.times { |i| mb.deliver(Arcana::Envelope.new(from: "a", to: "bob", correlation_id: "c#{i}")) }
+      mb.pending.should eq(3)
+    end
+
+    it "raises MailboxFull when at capacity" do
+      mb = Arcana::Mailbox.new("bob", max_queue: 2)
+      2.times { |i| mb.deliver(Arcana::Envelope.new(from: "a", to: "bob", correlation_id: "c#{i}")) }
+      expect_raises(Arcana::MailboxFull, /full \(2 messages/) do
+        mb.deliver(Arcana::Envelope.new(from: "a", to: "bob", correlation_id: "overflow"))
+      end
+    end
+
+    it "receiving frees a slot" do
+      mb = Arcana::Mailbox.new("bob", max_queue: 2)
+      mb.deliver(Arcana::Envelope.new(from: "a", to: "bob", correlation_id: "c1"))
+      mb.deliver(Arcana::Envelope.new(from: "a", to: "bob", correlation_id: "c2"))
+      expect_raises(Arcana::MailboxFull) { mb.deliver(Arcana::Envelope.new(from: "a", to: "bob", correlation_id: "c3")) }
+
+      mb.try_receive  # frees a slot
+      mb.deliver(Arcana::Envelope.new(from: "a", to: "bob", correlation_id: "c3"))
+      mb.pending.should eq(2)
+    end
+
+    it "unbounded by default" do
+      mb = Arcana::Mailbox.new("bob")
+      100.times { |i| mb.deliver(Arcana::Envelope.new(from: "a", to: "bob", correlation_id: "c#{i}")) }
+      mb.pending.should eq(100)
+    end
+  end
 end
