@@ -64,6 +64,30 @@ describe Arcana::Directory do
       expect_raises(Arcana::Error, /invalid.*token/) { Arcana::Directory.validate_address("a:b:c") }
       expect_raises(Arcana::Error, /invalid.*token/) { Arcana::Directory.validate_address("openai:CHAT") }
     end
+
+    it "accepts @-prefixed agent handles" do
+      Arcana::Directory.validate_address("@mj")
+      Arcana::Directory.validate_address("@arcana")
+      Arcana::Directory.validate_address("@sre-team")
+    end
+
+    it "rejects malformed @-handles" do
+      expect_raises(Arcana::Error, /invalid agent handle/) { Arcana::Directory.validate_address("@") }
+      expect_raises(Arcana::Error, /invalid agent handle/) { Arcana::Directory.validate_address("@Mj") }
+      expect_raises(Arcana::Error, /invalid agent handle/) { Arcana::Directory.validate_address("@1mj") }
+    end
+
+    it "rejects @ in colon-form service addresses" do
+      expect_raises(Arcana::Error, /sigil is for single-token/) do
+        Arcana::Directory.validate_address("@openai:chat")
+      end
+    end
+
+    it "handle? recognizes the @ sigil" do
+      Arcana::Directory.handle?("@mj").should be_true
+      Arcana::Directory.handle?("mj").should be_false
+      Arcana::Directory.handle?("openai:chat").should be_false
+    end
   end
 
   describe "#by_kind" do

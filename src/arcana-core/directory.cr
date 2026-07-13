@@ -15,7 +15,16 @@ module Arcana
   #   - Internal ephemeral mailboxes (`_reply:<id>`) are carved out by a
   #     leading underscore and are neither agents nor services.
   class Directory
+    # Token body: what an address (or each half of a colon-form address)
+    # must match after any leading sigil is stripped.
     NAME_PATTERN = /\A[a-z][a-z0-9-]*\z/
+
+    # Agent handles by convention use a leading `@` sigil so a process
+    # representing a conversational identity ("@mj", "@arcana") doesn't
+    # collide with a same-project tool service registered at the bare
+    # name ("mj", "arcana"). Purely a naming convention — the bus does
+    # not route differently on the sigil.
+    AGENT_HANDLE_PATTERN = /\A@[a-z][a-z0-9-]*\z/
 
     enum Kind
       Agent
@@ -97,20 +106,31 @@ module Arcana
       address.partition(':').last
     end
 
-    # Validate address format. Raises if malformed. Accepts either a single
-    # token or an `owner:capability`-style two-token form; kind is no longer
-    # inferred here, so a colon in the address is just a naming convention.
+    # Validate address format. Raises if malformed. Accepts:
+    #   - `foo` — bare single token
+    #   - `@foo` — agent-handle single token (leading `@` sigil)
+    #   - `owner:capability` — two-token colon form (`@` not allowed here)
+    #   - `_reply:<hex>` — internal ephemeral, exempt from validation
     def self.validate_address(address : String) : Nil
       return if address.starts_with?("_reply:") # internal ephemeral
 
       if address.includes?(':')
+        raise Error.new("invalid address #{address.inspect}: `@` sigil is for single-token agent handles, not colon-form service addresses") if address.starts_with?('@')
         parts = address.split(':', 2)
         raise Error.new("invalid address #{address.inspect}: colon-form must be two tokens") unless parts.size == 2
         raise Error.new("invalid first token in #{address.inspect}: must match #{NAME_PATTERN.source}") unless parts[0] =~ NAME_PATTERN
         raise Error.new("invalid second token in #{address.inspect}: must match #{NAME_PATTERN.source}") unless parts[1] =~ NAME_PATTERN
+      elsif address.starts_with?('@')
+        body = address[1..]
+        raise Error.new("invalid agent handle #{address.inspect}: `@` must be followed by #{NAME_PATTERN.source}") unless body =~ NAME_PATTERN
       else
         raise Error.new("invalid address #{address.inspect}: must match #{NAME_PATTERN.source}") unless address =~ NAME_PATTERN
       end
+    end
+
+    # Does this address use the `@` agent-handle sigil?
+    def self.handle?(address : String) : Bool
+      address.starts_with?('@')
     end
 
     # Register a listing. Raises if the address is malformed or already taken.
