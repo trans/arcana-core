@@ -40,7 +40,6 @@ module Arcana
       property name : String
       property description : String
       property kind : Kind
-      property capability : String?
       property schema : JSON::Any?
       property guide : String?
       property tags : Array(String)
@@ -50,13 +49,11 @@ module Arcana
         @name : String,
         @description : String,
         kind : Kind? = nil,
-        capability : String? = nil,
         @schema : JSON::Any? = nil,
         @guide : String? = nil,
         @tags : Array(String) = [] of String,
       )
         @kind = kind || Kind.from_address(@address)
-        @capability = capability || Directory.capability(@address)
       end
 
       def to_json(json : JSON::Builder) : Nil
@@ -65,7 +62,6 @@ module Arcana
           json.field "name", @name
           json.field "description", @description
           json.field "kind", @kind.to_s.downcase
-          json.field "capability", @capability if @capability
           json.field "schema", @schema if @schema
           json.field "guide", @guide if @guide
           json.field "tags", @tags unless @tags.empty?
@@ -98,12 +94,6 @@ module Arcana
     def self.owner(address : String) : String?
       return nil unless service?(address)
       address.partition(':').first
-    end
-
-    # Return the capability half of a service address, or nil if not a service.
-    def self.capability(address : String) : String?
-      return nil unless service?(address)
-      address.partition(':').last
     end
 
     # Validate address format. Raises if malformed. Accepts:
@@ -151,6 +141,18 @@ module Arcana
           "name" => JSON::Any.new(listing.name),
         } of String => JSON::Any,
       ))
+    end
+
+    # Replace the tags on an existing listing. No-op if unregistered.
+    # Toolset uses this at start time to union user-provided tags with
+    # the names of its registered tools.
+    def retag(address : String, tags : Array(String)) : Nil
+      @mutex.synchronize do
+        if listing = @listings[address]?
+          listing.tags = tags
+          @listings[address] = listing
+        end
+      end
     end
 
     # Refresh the last-seen timestamp for an address. No-op if unregistered.
@@ -270,12 +272,6 @@ module Arcana
       @mutex.synchronize { @listings.values.select { |l| l.tags.includes?(tag) } }
     end
 
-    # Listings providing a given capability (service address suffix).
-    def by_capability(capability : String) : Array(Listing)
-      @mutex.synchronize do
-        @listings.values.select { |l| Directory.capability(l.address) == capability }
-      end
-    end
 
     # Listings provided by a given owner (service address prefix).
     def by_owner(owner : String) : Array(Listing)
@@ -358,12 +354,13 @@ module Arcana
                  when "service" then Kind::Service
                  when "agent"   then Kind::Agent
                  end
+          # Legacy snapshots may still carry a `capability` field; we ignore
+          # it — capability is no longer a first-class Listing field.
           @listings[address] = Listing.new(
             address: address,
             name: entry["name"]?.try(&.as_s?) || address,
             description: entry["description"]?.try(&.as_s?) || "",
             kind: kind,
-            capability: entry["capability"]?.try(&.as_s?),
             schema: entry["schema"]?,
             guide: entry["guide"]?.try(&.as_s?),
             tags: entry["tags"]?.try(&.as_a?.try(&.map(&.as_s))) || [] of String,
@@ -413,7 +410,6 @@ module Arcana
         json.field "name", l.name
         json.field "description", l.description
         json.field "kind", l.kind.to_s.downcase
-        json.field "capability", l.capability if l.capability
         json.field "busy", @busy[l.address]? || false
         json.field "schema", l.schema if l.schema
         json.field "guide", l.guide if l.guide

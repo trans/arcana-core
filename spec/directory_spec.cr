@@ -46,11 +46,9 @@ describe Arcana::Directory do
       Arcana::Directory.agent?("_reply:abc123").should be_false
     end
 
-    it "decomposes a service into owner and capability" do
+    it "extracts the owner half of a service address" do
       Arcana::Directory.owner("openai:chat").should eq("openai")
-      Arcana::Directory.capability("openai:chat").should eq("chat")
       Arcana::Directory.owner("alice").should be_nil
-      Arcana::Directory.capability("alice").should be_nil
     end
 
     it "validates addresses" do
@@ -105,15 +103,15 @@ describe Arcana::Directory do
     end
   end
 
-  describe "#by_owner / #by_capability" do
-    it "filters services by owner and capability" do
+  describe "#by_owner" do
+    it "filters services by owner (address prefix before colon)" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(address: "openai:chat", name: "OpenAI Chat", description: "chat"))
       dir.register(Arcana::Directory::Listing.new(address: "openai:tts", name: "OpenAI TTS", description: "tts"))
       dir.register(Arcana::Directory::Listing.new(address: "anthropic:chat", name: "Anthropic Chat", description: "chat"))
 
       dir.by_owner("openai").size.should eq(2)
-      dir.by_capability("chat").size.should eq(2)
+      dir.by_owner("anthropic").size.should eq(1)
     end
   end
 
@@ -225,20 +223,19 @@ describe Arcana::Directory do
       parsed[0]["tags"].as_a.map(&.as_s).should eq(["tag1"])
     end
 
-    it "includes capability when set" do
+    it "serializes an explicit-kind service listing" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(
         address: "openai-chat", name: "OpenAI Chat", description: "chats",
         kind: Arcana::Directory::Kind::Service,
-        capability: "chat",
       ))
 
       parsed = JSON.parse(dir.to_json)
       parsed[0]["kind"].as_s.should eq("service")
-      parsed[0]["capability"].as_s.should eq("chat")
+      parsed[0]["capability"]?.should be_nil
     end
 
-    it "omits capability for agent listings" do
+    it "agent listings have no capability field" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(
         address: "cattacula", name: "cattacula", description: "an agent",

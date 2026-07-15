@@ -48,7 +48,6 @@ module Arcana
       @name : String? = nil,
       @description : String? = nil,
       @kind : Directory::Kind? = nil,
-      @capability : String? = nil,
       @guide : String? = nil,
       @schema : JSON::Any? = nil,
       @tags : Array(String) = [] of String,
@@ -71,7 +70,6 @@ module Arcana
     getter address : String
     getter name : String?
     getter description : String?
-    getter capability : String?
     getter guide : String?
     getter kind : Directory::Kind?
 
@@ -184,9 +182,6 @@ module Arcana
       end
       if k = @kind
         frame["kind"] = JSON::Any.new(k.to_s.downcase)
-      end
-      if capability = @capability
-        frame["capability"] = JSON::Any.new(capability)
       end
       if guide = @guide
         frame["guide"] = JSON::Any.new(guide)

@@ -83,7 +83,6 @@ module Arcana
       @address : String,
       @name : String,
       @description : String,
-      @capability : String? = nil,
       @tags : Array(String) = [] of String,
     )
       Directory.validate_address(@address)
@@ -98,7 +97,6 @@ module Arcana
         name: @name,
         description: @description,
         kind: Directory::Kind::Service,
-        capability: @capability,
         tags: @tags,
       ))
 
@@ -106,10 +104,10 @@ module Arcana
     end
 
     # Client-transport constructor: wraps a `Client` (already
-    # configured with address/name/kind/capability). Envelopes flow
-    # over the Client's WebSocket. The daemon's Directory is populated
-    # by the Client's join frame — this constructor does not register
-    # a listing itself.
+    # configured with address/name/kind/tags). Envelopes flow over the
+    # Client's WebSocket. The daemon's Directory is populated by the
+    # Client's join frame — this constructor does not register a
+    # listing itself.
     #
     # `name:` and `description:` are optional overrides for the tools
     # manifest header; if omitted, the client's own name/description
@@ -126,7 +124,6 @@ module Arcana
       @mailbox = nil
       @name = name || client.name || client.address
       @description = description || client.description || ""
-      @capability = nil
       @tags = [] of String
       @tools = {} of String => Tool
       @running = false
@@ -156,9 +153,15 @@ module Arcana
     # reading from the mailbox. On Client transport, registers an
     # on_message handler — the caller still owns Client#connect (which
     # blocks running the WebSocket loop).
+    #
+    # Also unions the user-provided tags with the registered tool names
+    # so `arcana_directory tag:"chat"` finds every entity offering a
+    # chat tool without the user having to double-declare.
     def start
       return if @running
       @running = true
+
+      union_tool_tags
 
       if mb = @mailbox
         spawn do
@@ -172,6 +175,16 @@ module Arcana
           dispatch(envelope)
         end
       end
+    end
+
+    # For Bus transport: retag the listing to include registered tool
+    # names. For Client transport: no local directory to update — the
+    # client already sent its join-frame tags; a future enhancement
+    # could send an update frame here.
+    private def union_tool_tags : Nil
+      return unless dir = @directory
+      combined = (@tags + @tools.keys.to_a).uniq
+      dir.retag(@address, combined)
     end
 
     # Stop the toolset. In Bus mode, unregisters and drops the read

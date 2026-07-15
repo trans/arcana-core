@@ -9,14 +9,32 @@ describe Arcana::Toolset do
       address: "mj",
       name: "Minanime",
       description: "Image generation studio",
-      capability: "image",
       tags: ["image"],
     )
     ts.tool("pixelize", "pixel-art stylize") { |_| JSON::Any.new("ok") }
 
     listing = dir.lookup("mj").not_nil!
     listing.kind.should eq(Arcana::Directory::Kind::Service)
-    listing.capability.should eq("image")
+    listing.tags.should contain("image")
+  end
+
+  it "unions user-provided tags with registered tool names on start" do
+    bus = Arcana::Bus.new
+    dir = Arcana::Directory.new
+    ts = Arcana::Toolset.new(
+      bus: bus, directory: dir,
+      address: "openai",
+      name: "OpenAI",
+      description: "provider",
+      tags: ["llm", "openai"],
+    )
+    ts.tool("chat", "chat completion") { |_| JSON::Any.new("ok") }
+    ts.tool("embed", "text embeddings") { |_| JSON::Any.new("ok") }
+    ts.tool("tts", "text-to-speech") { |_| JSON::Any.new("ok") }
+    ts.start
+
+    listing = dir.lookup("openai").not_nil!
+    listing.tags.sort.should eq(["chat", "embed", "llm", "openai", "tts"])
   end
 
   it "responds to {\"tool\":\"help\"} with a tools manifest" do
@@ -150,7 +168,7 @@ describe Arcana::Toolset do
         name: "Minanime",
         description: "Image generation studio",
         kind: Arcana::Directory::Kind::Service,
-        capability: "image",
+        tags: ["image"],
       )
       ts = Arcana::Toolset.new(client: client)
       ts.tool("pixelize", "Pixel-art stylize") { |_| JSON::Any.new("ok") }
