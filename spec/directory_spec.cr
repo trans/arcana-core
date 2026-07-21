@@ -235,6 +235,18 @@ describe Arcana::Directory do
       parsed[0]["capability"]?.should be_nil
     end
 
+    it "does not serialize the ephemeral flag (in-memory only)" do
+      dir = Arcana::Directory.new
+      dir.register(Arcana::Directory::Listing.new(
+        address: "code-svc", name: "Code Service", description: "s",
+        kind: Arcana::Directory::Kind::Service,
+        ephemeral: true,
+      ))
+
+      parsed = JSON.parse(dir.to_json)
+      parsed[0]["ephemeral"]?.should be_nil
+    end
+
     it "agent listings have no capability field" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(

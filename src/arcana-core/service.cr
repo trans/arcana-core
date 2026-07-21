@@ -45,6 +45,7 @@ module Arcana
         schema: @schema,
         guide: @guide,
         tags: @tags,
+        ephemeral: true,
       ))
 
       @mailbox = @bus.mailbox(@address)

@@ -34,6 +34,16 @@ describe Arcana::Service do
     listing.tags.should eq(["convert"])
   end
 
+  it "marks its listing as ephemeral (skip persistent snapshot)" do
+    bus = Arcana::Bus.new
+    dir = Arcana::Directory.new
+    Arcana::Service.new(
+      bus: bus, directory: dir,
+      address: "test:eph", name: "Eph", description: "s",
+    ) { |d| d }
+    dir.lookup("test:eph").not_nil!.ephemeral.should be_true
+  end
+
   it "accepts colon-form addresses too" do
     bus = Arcana::Bus.new
     dir = Arcana::Directory.new

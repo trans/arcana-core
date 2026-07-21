@@ -98,6 +98,7 @@ module Arcana
         description: @description,
         kind: Directory::Kind::Service,
         tags: @tags,
+        ephemeral: true,
       ))
 
       @mailbox = bus.mailbox(@address)

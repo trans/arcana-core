@@ -44,6 +44,14 @@ module Arcana
       property guide : String?
       property tags : Array(String)
 
+      # In-memory only. `true` = registered by code inside the daemon
+      # (Service.new / Toolset.new); these should NOT be persisted to
+      # snapshot, because the code re-registers them on every startup.
+      # `false` = registered by a remote client (WS join or POST
+      # /register); these ARE persisted so the listing survives a
+      # restart until the TTL prunes it. Not serialized to JSON.
+      property ephemeral : Bool
+
       def initialize(
         @address : String,
         @name : String,
@@ -52,6 +60,7 @@ module Arcana
         @schema : JSON::Any? = nil,
         @guide : String? = nil,
         @tags : Array(String) = [] of String,
+        @ephemeral : Bool = false,
       )
         @kind = kind || Kind.from_address(@address)
       end

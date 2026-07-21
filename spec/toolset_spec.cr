@@ -18,6 +18,17 @@ describe Arcana::Toolset do
     listing.tags.should contain("image")
   end
 
+  it "marks its listing as ephemeral (code-registered)" do
+    bus = Arcana::Bus.new
+    dir = Arcana::Directory.new
+    ts = Arcana::Toolset.new(
+      bus: bus, directory: dir,
+      address: "eph", name: "Eph", description: "s",
+    )
+    ts.tool("noop", "no-op") { |_| JSON::Any.new("ok") }
+    dir.lookup("eph").not_nil!.ephemeral.should be_true
+  end
+
   it "unions user-provided tags with registered tool names on start" do
     bus = Arcana::Bus.new
     dir = Arcana::Directory.new
