@@ -287,4 +287,82 @@ describe Arcana::Bus do
       (Time.utc - dir.last_seen("a").not_nil!).should be < 1.second
     end
   end
+
+  describe "system_topics (sys.message.sent firehose)" do
+    it "is off by default — no fanout" do
+      bus = Arcana::Bus.new
+      bus.mailbox("alice")
+      bus.mailbox("bob")
+      bus.mailbox("aix")
+      bus.subscribe("sys.message.sent", "aix")
+
+      bus.send(Arcana::Envelope.new(from: "alice", to: "bob", correlation_id: "c1"))
+      # aix's mailbox stays empty — firehose disabled
+      bus.mailbox("aix").pending.should eq(0)
+      # bob got the real message
+      bus.mailbox("bob").pending.should eq(1)
+    end
+
+    it "broadcasts a metadata envelope to sys.message.sent subscribers when enabled" do
+      bus = Arcana::Bus.new
+      bus.system_topics = true
+      bus.mailbox("alice")
+      bus.mailbox("bob")
+      bus.mailbox("aix")
+      bus.subscribe("sys.message.sent", "aix")
+
+      env = Arcana::Envelope.new(
+        from: "alice", to: "bob", subject: "hi bob",
+        payload: JSON::Any.new({"msg" => JSON::Any.new("hello")}),
+        correlation_id: "c1",
+      )
+      bus.send(env)
+
+      # Real message reached bob
+      bus.mailbox("bob").pending.should eq(1)
+
+      # Firehose copy reached aix
+      bus.mailbox("aix").pending.should eq(1)
+      copy = bus.mailbox("aix").try_receive.not_nil!
+      copy.subject.should eq("sys.message.sent")
+      copy.correlation_id.should eq("c1")
+
+      data = copy.payload
+      data["recipient"].as_s.should eq("bob")
+      data["sender"].as_s.should eq("alice")
+      data["subject"].as_s.should eq("hi bob")
+      data["correlation_id"].as_s.should eq("c1")
+      data["ordering"].as_s.should_not be_empty
+      data["timestamp"].as_s.should_not be_empty
+    end
+
+    it "does not recurse: sys.* deliveries are not themselves broadcast" do
+      bus = Arcana::Bus.new
+      bus.system_topics = true
+      bus.mailbox("alice")
+      bus.mailbox("bob")
+      bus.mailbox("aix")
+      bus.subscribe("sys.message.sent", "aix")
+
+      bus.send(Arcana::Envelope.new(from: "alice", to: "bob", correlation_id: "c1"))
+
+      # aix got exactly ONE firehose copy (not one + one-about-the-copy...).
+      bus.mailbox("aix").pending.should eq(1)
+    end
+
+    it "supports multiple subscribers to the firehose" do
+      bus = Arcana::Bus.new
+      bus.system_topics = true
+      bus.mailbox("alice")
+      bus.mailbox("bob")
+      bus.mailbox("watcher1")
+      bus.mailbox("watcher2")
+      bus.subscribe("sys.message.sent", "watcher1")
+      bus.subscribe("sys.message.sent", "watcher2")
+
+      bus.send(Arcana::Envelope.new(from: "alice", to: "bob", correlation_id: "c1"))
+      bus.mailbox("watcher1").pending.should eq(1)
+      bus.mailbox("watcher2").pending.should eq(1)
+    end
+  end
 end

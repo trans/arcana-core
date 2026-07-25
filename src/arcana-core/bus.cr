@@ -35,6 +35,14 @@ module Arcana
     # hooks.
     property events : Events::Backend?
 
+    # When true, every successful send fans out a metadata copy to the
+    # `sys.message.sent` topic. Reactive infrastructure (like AIX's
+    # tmux bridge) subscribes to it and gets push-quality wake
+    # notifications without polling GET /events. Default OFF — enable
+    # via ARCANA_SYSTEM_TOPICS=1 in the daemon, or set directly here.
+    # Fanout cost: one extra Mailbox#deliver per subscriber per send.
+    property system_topics : Bool = false
+
     # Get or create a mailbox for an address.
     def mailbox(address : String) : Mailbox
       @mutex.synchronize do
@@ -122,6 +130,7 @@ module Arcana
         raise ex
       end
       record_send(envelope)
+      broadcast_system_send(envelope) if @system_topics
     end
 
     # Send, but return false instead of raising when the target mailbox
@@ -139,7 +148,46 @@ module Arcana
         return false
       end
       record_send(envelope)
+      broadcast_system_send(envelope) if @system_topics
       true
+    end
+
+    # Fan a metadata copy of the just-sent envelope to subscribers of
+    # `sys.message.sent`. Uses direct mailbox delivery (not publish/
+    # send) so there's no recursion back through record_send /
+    # broadcast_system_send. Subscribers that can't keep up (MailboxFull)
+    # are dropped silently — the firehose is best-effort.
+    private def broadcast_system_send(envelope : Envelope) : Nil
+      return if envelope.to.starts_with?("sys.") # never fan our own broadcasts
+      subs = @mutex.synchronize { @subscriptions["sys.message.sent"]?.try(&.dup) }
+      return unless subs && !subs.empty?
+
+      payload = JSON::Any.new({
+        "recipient"      => JSON::Any.new(envelope.to),
+        "sender"         => JSON::Any.new(envelope.from),
+        "ordering"       => JSON::Any.new(envelope.ordering.to_s.downcase),
+        "correlation_id" => JSON::Any.new(envelope.correlation_id),
+        "subject"        => JSON::Any.new(envelope.subject),
+        "timestamp"      => JSON::Any.new(envelope.timestamp.to_rfc3339),
+      } of String => JSON::Any)
+
+      subs.each do |sub_addr|
+        mb = @mutex.synchronize { @mailboxes[sub_addr]? }
+        next unless mb
+        copy = Envelope.new(
+          from: "sys.message.sent",
+          to: sub_addr,
+          subject: "sys.message.sent",
+          payload: payload,
+          correlation_id: envelope.correlation_id,
+        )
+        begin
+          mb.deliver(copy)
+        rescue MailboxFull
+          # Firehose is best-effort. Subscriber that can't keep up
+          # loses this wake — better than blocking the sender.
+        end
+      end
     end
 
     private def record_rejected(envelope : Envelope, reason : String)
