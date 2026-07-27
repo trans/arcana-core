@@ -25,7 +25,7 @@ describe Arcana::Directory do
   it "lists all listings" do
     dir = Arcana::Directory.new
     dir.register(Arcana::Directory::Listing.new(
-      address: "a", name: "A", description: "a",
+      address: "@a", name: "A", description: "a",
     ))
     dir.register(Arcana::Directory::Listing.new(
       address: "arcana:b", name: "B", description: "b",
@@ -88,11 +88,76 @@ describe Arcana::Directory do
     end
   end
 
+  describe "sigil-vs-kind enforcement (post-0.30)" do
+    it "rejects a kind=agent registration without the @ sigil" do
+      dir = Arcana::Directory.new
+      expect_raises(Arcana::Error, /must use the `@` sigil/) do
+        dir.register(Arcana::Directory::Listing.new(
+          address: "mj", name: "mj", description: "should have been @mj",
+          kind: Arcana::Directory::Kind::Agent,
+        ))
+      end
+    end
+
+    it "suggests the @-prefixed alternative in the error message" do
+      dir = Arcana::Directory.new
+      begin
+        dir.register(Arcana::Directory::Listing.new(
+          address: "helper", name: "Helper", description: "s",
+          kind: Arcana::Directory::Kind::Agent,
+        ))
+        fail "should have raised"
+      rescue ex : Arcana::Error
+        ex.message.not_nil!.should contain("@helper")
+      end
+    end
+
+    it "rejects a kind=service registration WITH the @ sigil" do
+      dir = Arcana::Directory.new
+      expect_raises(Arcana::Error, /must not use the `@` sigil/) do
+        dir.register(Arcana::Directory::Listing.new(
+          address: "@openai", name: "OpenAI", description: "s",
+          kind: Arcana::Directory::Kind::Service,
+        ))
+      end
+    end
+
+    it "accepts @foo as kind=agent" do
+      dir = Arcana::Directory.new
+      dir.register(Arcana::Directory::Listing.new(
+        address: "@mj", name: "mj", description: "agent",
+        kind: Arcana::Directory::Kind::Agent,
+      ))
+      dir.lookup("@mj").not_nil!.kind.should eq(Arcana::Directory::Kind::Agent)
+    end
+
+    it "accepts bare or colon-form as kind=service" do
+      dir = Arcana::Directory.new
+      dir.register(Arcana::Directory::Listing.new(
+        address: "arcana", name: "Arcana", description: "toolset",
+        kind: Arcana::Directory::Kind::Service,
+      ))
+      dir.register(Arcana::Directory::Listing.new(
+        address: "openai:chat", name: "OpenAI Chat", description: "service",
+        kind: Arcana::Directory::Kind::Service,
+      ))
+    end
+
+    it "defaults bare non-colon addresses to kind=service (agents need explicit @)" do
+      dir = Arcana::Directory.new
+      dir.register(Arcana::Directory::Listing.new(
+        address: "arcana", name: "Arcana", description: "toolset",
+        # no kind passed — should default to Service now
+      ))
+      dir.lookup("arcana").not_nil!.kind.should eq(Arcana::Directory::Kind::Service)
+    end
+  end
+
   describe "#by_kind" do
     it "filters by agent or service" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(
-        address: "agent1", name: "Agent", description: "smart",
+        address: "@agent1", name: "Agent", description: "smart",
       ))
       dir.register(Arcana::Directory::Listing.new(
         address: "arcana:svc1", name: "Service", description: "dumb",
@@ -212,13 +277,13 @@ describe Arcana::Directory do
     it "serializes all listings" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(
-        address: "a", name: "A", description: "does A",
+        address: "@a", name: "A", description: "does A",
         tags: ["tag1"],
       ))
 
       parsed = JSON.parse(dir.to_json)
       parsed.as_a.size.should eq(1)
-      parsed[0]["address"].as_s.should eq("a")
+      parsed[0]["address"].as_s.should eq("@a")
       parsed[0]["kind"].as_s.should eq("agent")
       parsed[0]["tags"].as_a.map(&.as_s).should eq(["tag1"])
     end
@@ -250,7 +315,7 @@ describe Arcana::Directory do
     it "agent listings have no capability field" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(
-        address: "cattacula", name: "cattacula", description: "an agent",
+        address: "@cattacula", name: "cattacula", description: "an agent",
       ))
 
       parsed = JSON.parse(dir.to_json)
@@ -263,7 +328,7 @@ describe Arcana::Directory do
     it "saves and loads listings" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(
-        address: "agent1", name: "Agent One", description: "does stuff",
+        address: "@agent1", name: "Agent One", description: "does stuff",
         tags: ["ai", "test"],
       ))
       dir.register(Arcana::Directory::Listing.new(
@@ -280,7 +345,7 @@ describe Arcana::Directory do
         count.should eq(2)
         dir2.list.size.should eq(2)
 
-        agent = dir2.lookup("agent1")
+        agent = dir2.lookup("@agent1")
         agent.should_not be_nil
         agent.not_nil!.name.should eq("Agent One")
         agent.not_nil!.kind.should eq(Arcana::Directory::Kind::Agent)

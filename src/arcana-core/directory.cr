@@ -19,19 +19,30 @@ module Arcana
     # must match after any leading sigil is stripped.
     NAME_PATTERN = /\A[a-z][a-z0-9-]*\z/
 
-    # Agent handles by convention use a leading `@` sigil so a process
-    # representing a conversational identity ("@mj", "@arcana") doesn't
-    # collide with a same-project tool service registered at the bare
-    # name ("mj", "arcana"). Purely a naming convention — the bus does
-    # not route differently on the sigil.
+    # Agent handles use the leading `@` sigil so a process representing
+    # a conversational identity ("@mj", "@arcana") doesn't collide with
+    # a same-project tool service registered at the bare name ("mj",
+    # "arcana"). Enforced at `register` time: kind=agent addresses MUST
+    # start with `@`, and kind=service addresses MUST NOT. The bus
+    # still routes purely on the address string — the sigil is a naming
+    # convention that the registration path enforces so senders can
+    # tell at a glance who's an agent.
     AGENT_HANDLE_PATTERN = /\A@[a-z][a-z0-9-]*\z/
 
     enum Kind
       Agent
       Service
 
+      # Best-guess kind from address shape. Used as a fallback when the
+      # caller doesn't pass an explicit `kind:`. Precedence:
+      #   @foo   → Agent
+      #   foo:x  → Service
+      #   foo    → Service (bare non-colon defaults to service — a bare
+      #           token is a Toolset or single-purpose service; agents
+      #           require the `@` sigil).
       def self.from_address(address : String) : self
-        Directory.service?(address) ? Service : Agent
+        return Agent if address.starts_with?('@')
+        Service
       end
     end
 
@@ -132,9 +143,33 @@ module Arcana
       address.starts_with?('@')
     end
 
-    # Register a listing. Raises if the address is malformed or already taken.
+    # Enforce the sigil convention: agent addresses must use `@`,
+    # service addresses must not. Internal `_reply:` mailboxes are
+    # never routed through this path.
+    private def validate_kind_and_sigil!(address : String, kind : Kind) : Nil
+      case kind
+      when Kind::Agent
+        unless address.starts_with?('@')
+          raise Error.new(
+            "agent addresses must use the `@` sigil — got #{address.inspect}. " \
+            "Register as `@#{address}` instead, or set kind: \"service\" if this is a tool provider."
+          )
+        end
+      when Kind::Service
+        if address.starts_with?('@')
+          raise Error.new(
+            "service addresses must not use the `@` sigil — got #{address.inspect}. " \
+            "The `@` prefix is reserved for agent handles. Drop the prefix, or set kind: \"agent\" if this is a conversational identity."
+          )
+        end
+      end
+    end
+
+    # Register a listing. Raises if the address is malformed, already
+    # taken, or its sigil doesn't match its kind.
     def register(listing : Listing)
       Directory.validate_address(listing.address)
+      validate_kind_and_sigil!(listing.address, listing.kind)
       @mutex.synchronize do
         if @listings.has_key?(listing.address)
           raise Error.new("Address already registered: #{listing.address}")
