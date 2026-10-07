@@ -15,9 +15,8 @@ module Arcana
   #
   #      ts = Arcana::Toolset.new(
   #        bus: bus, directory: dir,
-  #        address: "arcana:markdown",
+  #        address: "markdown",
   #        name: "Markdown", description: "Converts markdown to HTML/ANSI",
-  #        capability: "markdown",
   #      )
   #      ts.tool("to_html", ...) { |data| ... }
   #      ts.start
@@ -30,14 +29,22 @@ module Arcana
   #        address: "mj", name: "Minanime",
   #        description: "Image generation studio",
   #        kind: Arcana::Directory::Kind::Service,
-  #        capability: "image", tags: ["image"],
+  #        tags: ["image"],
   #      )
   #      ts = Arcana::Toolset.new(client: client)
   #      ts.tool("pixelize", "Pixel-art stylize", input_schema: ...) do |data|
   #        JSON::Any.new({"image_base64" => ...})
   #      end
-  #      ts.start
-  #      client.connect  # blocks — WebSocket receive loop
+  #      ts.run  # joins the bus, then blocks running the WebSocket loop
+  #
+  #    `run` is `start` + `client.connect`. Over a Client, `start` alone
+  #    only installs the message handler: the service has no directory
+  #    listing until the Client connects, and a Toolset still unconnected
+  #    `connect_grace` after `start` warns on STDERR. To serve several
+  #    Toolsets from one process, run all but the last in fibers:
+  #
+  #      spawn { camera.run }
+  #      voice.run
   #
   # Same tool-registration API, same manifest shape, same dispatch. The
   # transport is the only thing that differs.
@@ -69,6 +76,10 @@ module Arcana
     end
 
     getter address : String
+
+    # How long a Client-transport Toolset may stay unconnected after
+    # `start` before it warns that it is invisible on the bus.
+    property connect_grace : Time::Span = 5.seconds
 
     @bus : Bus?
     @directory : Directory?
@@ -153,7 +164,7 @@ module Arcana
     # Start listening for envelopes. On Bus transport, spawns a fiber
     # reading from the mailbox. On Client transport, registers an
     # on_message handler — the caller still owns Client#connect (which
-    # blocks running the WebSocket loop).
+    # blocks running the WebSocket loop), or can call `run` instead.
     #
     # Also unions the user-provided tags with the registered tool names
     # so `arcana_directory tag:"chat"` finds every entity offering a
@@ -174,6 +185,32 @@ module Arcana
       elsif c = @client
         c.on_message do |envelope|
           dispatch(envelope)
+        end
+        warn_unless_connected(c)
+      end
+    end
+
+    # Start and serve until the connection closes. On Client transport
+    # this is `start` followed by `Client#connect`, which sends the join
+    # frame (creating the directory listing) and blocks running the
+    # WebSocket loop. On Bus transport the listing already exists, so
+    # `run` starts and then blocks forever.
+    def run
+      start
+      if c = @client
+        c.connect
+      else
+        sleep
+      end
+    end
+
+    private def warn_unless_connected(client : Client) : Nil
+      spawn do
+        sleep @connect_grace
+        if @running && !client.connected?
+          STDERR.puts "Arcana::Toolset #{@address}: started but its Client is not connected, " \
+                      "so it has no directory listing and receives nothing. " \
+                      "Call client.connect after start, or use Toolset#run."
         end
       end
     end

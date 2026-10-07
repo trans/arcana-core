@@ -1,4 +1,14 @@
 require "./spec_helper"
+require "http/server"
+
+private def receive_within(channel : Channel(T), timeout = 5.seconds) : T forall T
+  select
+  when value = channel.receive
+    value
+  when timeout(timeout)
+    raise "nothing received within #{timeout}"
+  end
+end
 
 describe Arcana::Toolset do
   it "registers as a service in the directory" do
@@ -206,6 +216,44 @@ describe Arcana::Toolset do
       manifest = ts.manifest
       manifest["name"].as_s.should eq("Custom")
       manifest["description"].as_s.should eq("override")
+    end
+
+    it "run joins the bus and serves requests" do
+      frames = Channel(JSON::Any).new(10)
+      sockets = Channel(HTTP::WebSocket).new(1)
+      server = HTTP::Server.new([HTTP::WebSocketHandler.new do |ws, _ctx|
+        ws.on_message { |msg| frames.send(JSON.parse(msg)) }
+        sockets.send(ws)
+      end])
+      address = server.bind_unused_port("127.0.0.1")
+      spawn { server.listen }
+
+      client = Arcana::Client.new(
+        url: "ws://127.0.0.1:#{address.port}/bus",
+        address: "mj",
+        kind: Arcana::Directory::Kind::Service,
+      )
+      ts = Arcana::Toolset.new(client: client)
+      ts.tool("ping", "replies pong") { |_| JSON::Any.new("pong") }
+
+      begin
+        spawn { ts.run }
+
+        join = receive_within(frames)
+        join["type"].should eq("join")
+        join["address"].should eq("mj")
+
+        receive_within(sockets).send(Arcana::Envelope.new(
+          from: "caller", to: "mj", payload: JSON.parse(%({"tool":"ping"}))).to_json)
+
+        reply = receive_within(frames)
+        reply["type"].should eq("send")
+        reply["envelope"]["to"].should eq("caller")
+        reply["envelope"]["payload"].to_json.should contain("pong")
+      ensure
+        client.close
+        server.close
+      end
     end
   end
 
