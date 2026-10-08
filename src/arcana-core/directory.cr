@@ -92,7 +92,15 @@ module Arcana
     @listings = {} of String => Listing
     @busy = {} of String => Bool
     @last_seen = {} of String => Time
+    @owner_tokens = {} of String => String
+    @offline = Set(String).new
     @mutex = Mutex.new
+
+    # How long an agent listing lives without activity before
+    # `prune_stale_agents` drops it. When set, agent listings report
+    # `expires_at` (last seen + TTL). The pruner still takes its TTL as
+    # an argument; set both to the same value.
+    property agent_ttl : Time::Span?
 
     # Optional event recorder. When set, material directory actions
     # (register, unregister, busy changes, prune) emit events.
@@ -187,6 +195,149 @@ module Arcana
       ))
     end
 
+    # Raised by `claim` and `check_owner!` when an address is held under
+    # an owner token the caller didn't present.
+    class HeldError < Error
+      getter address : String
+
+      def initialize(@address : String, message : String)
+        super(message)
+      end
+    end
+
+    # What `claim` did.
+    enum Claim
+      Registered # the address was free
+      Yours      # already held under this owner token; listing refreshed
+      Claimed    # held without an owner token; now held under this one
+    end
+
+    # Register `listing`, or refresh it when `owner_token` shows the
+    # caller already holds the address. This is how an agent that
+    # forgot it registered (or whose session hook registered for it)
+    # tells "that's me" from "someone else has it".
+    #
+    # - Free address: registered, under `owner_token` if one is given.
+    # - Held under the same owner token: the listing is refreshed from
+    #   `listing` (fields it leaves out keep their values), marked
+    #   online, and its last-seen time updated.
+    # - Held without an owner token: taken over under `owner_token`. An
+    #   unowned listing protects nothing, so taking it gives nothing away.
+    # - Otherwise raises: `HeldError` when another owner token holds it,
+    #   `Error` ("Address already registered") when neither side has one.
+    def claim(listing : Listing, owner_token : String? = nil) : Claim
+      token = owner_token.try(&.presence)
+      address = listing.address
+      Directory.validate_address(address)
+      validate_kind_and_sigil!(address, listing.kind)
+      result = @mutex.synchronize do
+        outcome = Claim::Registered
+        if existing = @listings[address]?
+          held = @owner_tokens[address]?
+          if held && token == held
+            outcome = Claim::Yours
+          elsif held
+            raise HeldError.new(address, held_message(address, token))
+          elsif token
+            outcome = Claim::Claimed
+          else
+            raise Error.new("Address already registered: #{address} (it has no owner token, so the bus can't tell whether it's you)")
+          end
+          listing = refreshed(existing, listing)
+        end
+        @listings[address] = listing
+        @owner_tokens[address] = token if token
+        @last_seen[address] = Time.utc
+        @offline.delete(address)
+        outcome
+      end
+      event_type = case result
+                   when .yours?   then "listing.refreshed"
+                   when .claimed? then "listing.claimed"
+                   else                "listing.registered"
+                   end
+      @events.try &.record(Events::Event.new(
+        type: event_type,
+        subject: address,
+        metadata: {
+          "kind" => JSON::Any.new(listing.kind.to_s.downcase),
+          "name" => JSON::Any.new(listing.name),
+        } of String => JSON::Any,
+      ))
+      result
+    end
+
+    # Raises `HeldError` unless `owner_token` matches the owner token the
+    # address is held under. Addresses held without one accept anything.
+    def check_owner!(address : String, owner_token : String?) : Nil
+      held = @mutex.synchronize { @owner_tokens[address]? }
+      return unless held
+      return if owner_token == held
+      raise HeldError.new(address, held_message(address, owner_token.try(&.presence)))
+    end
+
+    # A re-registration refreshes the listing: fields it gives replace
+    # the old ones; fields it leaves out (empty description, no schema,
+    # guide or tags, name defaulted to the address) keep their values.
+    private def refreshed(old : Listing, new : Listing) : Listing
+      Listing.new(
+        address: new.address,
+        name: new.name == new.address ? old.name : new.name,
+        description: new.description.empty? ? old.description : new.description,
+        kind: new.kind,
+        schema: new.schema || old.schema,
+        guide: new.guide || old.guide,
+        tags: new.tags.empty? ? old.tags : new.tags,
+        ephemeral: new.ephemeral,
+      )
+    end
+
+    private def held_message(address : String, given : String?) : String
+      if given
+        "#{address} is held by another owner: the owner token doesn't match"
+      else
+        "#{address} is held by another owner: changing it needs the owner token it was registered with"
+      end
+    end
+
+    # Owner tokens by address (for snapshot save). Never serialized in
+    # directory listings.
+    def owner_tokens : Hash(String, String)
+      @mutex.synchronize { @owner_tokens.dup }
+    end
+
+    # Restore an owner token (for snapshot load).
+    def set_owner_token(address : String, token : String) : Nil
+      @mutex.synchronize { @owner_tokens[address] = token }
+    end
+
+    # Mark a listing online or offline. Offline means no session is
+    # running for it; its mailbox keeps collecting mail. `claim` marks
+    # it online again.
+    def set_online(address : String, online : Bool) : Nil
+      changed = @mutex.synchronize do
+        raise Error.new("no directory listing for '#{address}'") unless @listings.has_key?(address)
+        was_offline = @offline.includes?(address)
+        online ? @offline.delete(address) : @offline.add(address)
+        was_offline == online
+      end
+      return unless changed
+      @events.try &.record(Events::Event.new(
+        type: "listing.online_changed",
+        subject: address,
+        metadata: {"online" => JSON::Any.new(online)} of String => JSON::Any,
+      ))
+    end
+
+    def online?(address : String) : Bool
+      @mutex.synchronize { !@offline.includes?(address) }
+    end
+
+    # Addresses currently marked offline (for snapshot save).
+    def offline_addresses : Array(String)
+      @mutex.synchronize { @offline.to_a }
+    end
+
     # Replace the tags on an existing listing. No-op if unregistered.
     # Toolset uses this at start time to union user-provided tags with
     # the names of its registered tools.
@@ -248,6 +399,8 @@ module Arcana
             @listings.delete(addr)
             @busy.delete(addr)
             @last_seen.delete(addr)
+            @owner_tokens.delete(addr)
+            @offline.delete(addr)
             true
           else
             false
@@ -270,6 +423,8 @@ module Arcana
         r = @listings.delete(address)
         @busy.delete(address)
         @last_seen.delete(address)
+        @owner_tokens.delete(address)
+        @offline.delete(address)
         r
       end
       @events.try &.record(Events::Event.new(type: "listing.unregistered", subject: address)) if removed
@@ -455,6 +610,15 @@ module Arcana
         json.field "description", l.description
         json.field "kind", l.kind.to_s.downcase
         json.field "busy", @busy[l.address]? || false
+        if l.kind.agent?
+          json.field "online", !@offline.includes?(l.address)
+          if seen = @last_seen[l.address]?
+            json.field "last_seen", seen.to_rfc3339
+            if ttl = @agent_ttl
+              json.field "expires_at", (seen + ttl).to_rfc3339
+            end
+          end
+        end
         json.field "schema", l.schema if l.schema
         json.field "guide", l.guide if l.guide
         json.field "tags", l.tags unless l.tags.empty?

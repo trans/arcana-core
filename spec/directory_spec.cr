@@ -456,4 +456,114 @@ describe Arcana::Directory do
       Arcana::Directory.migrate_legacy_address("wow:service").should be_nil
     end
   end
+
+  describe "claim (owner tokens)" do
+    agent = ->(desc : String) {
+      Arcana::Directory::Listing.new(address: "@proj", name: "@proj", description: desc)
+    }
+
+    it "registers a free address" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), "tok").should eq(Arcana::Directory::Claim::Registered)
+      dir.lookup("@proj").not_nil!.description.should eq("first")
+      dir.online?("@proj").should be_true
+    end
+
+    it "recognizes the same owner token as yours and refreshes the listing" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), "tok")
+      dir.set_online("@proj", false)
+      dir.claim(agent.call("second"), "tok").should eq(Arcana::Directory::Claim::Yours)
+      dir.lookup("@proj").not_nil!.description.should eq("second")
+      dir.online?("@proj").should be_true
+    end
+
+    it "keeps fields a refresh leaves out" do
+      dir = Arcana::Directory.new
+      dir.claim(Arcana::Directory::Listing.new(address: "@proj", name: "Proj", description: "full",
+        guide: "how", tags: ["x"]), "tok")
+      dir.claim(Arcana::Directory::Listing.new(address: "@proj", name: "@proj", description: ""), "tok")
+      l = dir.lookup("@proj").not_nil!
+      {l.name, l.description, l.guide, l.tags}.should eq({"Proj", "full", "how", ["x"]})
+    end
+
+    it "refuses a different owner token, or none" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), "tok")
+      expect_raises(Arcana::Directory::HeldError, /owner token doesn't match/) do
+        dir.claim(agent.call("intruder"), "other")
+      end
+      expect_raises(Arcana::Directory::HeldError, /needs the owner token/) do
+        dir.claim(agent.call("intruder"), nil)
+      end
+      dir.lookup("@proj").not_nil!.description.should eq("first")
+    end
+
+    it "takes over a listing held without an owner token" do
+      dir = Arcana::Directory.new
+      dir.register(agent.call("legacy"))
+      dir.claim(agent.call("mine"), "tok").should eq(Arcana::Directory::Claim::Claimed)
+      expect_raises(Arcana::Directory::HeldError) { dir.claim(agent.call("x"), "other") }
+    end
+
+    it "still refuses a tokenless claim on a tokenless listing" do
+      dir = Arcana::Directory.new
+      dir.register(agent.call("legacy"))
+      expect_raises(Arcana::Error, /already registered.*can't tell whether it's you/) do
+        dir.claim(agent.call("again"), "")
+      end
+    end
+
+    it "check_owner! accepts the owner token and unowned listings" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), "tok")
+      dir.check_owner!("@proj", "tok")
+      expect_raises(Arcana::Directory::HeldError) { dir.check_owner!("@proj", "nope") }
+      dir.register(Arcana::Directory::Listing.new(address: "@free", name: "f", description: "f"))
+      dir.check_owner!("@free", nil)
+    end
+
+    it "forgets the owner token on unregister and prune" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), "tok")
+      dir.unregister("@proj")
+      dir.claim(agent.call("new"), "other").should eq(Arcana::Directory::Claim::Registered)
+
+      dir.set_last_seen("@proj", Time.utc - 2.hours)
+      dir.prune_stale_agents(1.hour).should eq(["@proj"])
+      dir.claim(agent.call("newer"), "third").should eq(Arcana::Directory::Claim::Registered)
+      dir.owner_tokens.should eq({"@proj" => "third"})
+    end
+  end
+
+  describe "presence and expiry in listings" do
+    it "reports online, last_seen and expires_at for agents" do
+      dir = Arcana::Directory.new
+      dir.agent_ttl = 1.day
+      dir.claim(Arcana::Directory::Listing.new(address: "@proj", name: "p", description: "p"), "tok")
+      dir.set_online("@proj", false)
+
+      json = JSON.parse(dir.to_json(dir.lookup("@proj").not_nil!))
+      json["online"].as_bool.should be_false
+      seen = Time.parse_rfc3339(json["last_seen"].as_s)
+      Time.parse_rfc3339(json["expires_at"].as_s).should eq(seen + 1.day)
+      json.as_h.has_key?("owner_token").should be_false
+    end
+
+    it "omits presence for services and expiry without a TTL" do
+      dir = Arcana::Directory.new
+      dir.register(Arcana::Directory::Listing.new(address: "svc", name: "s", description: "s"))
+      dir.register(Arcana::Directory::Listing.new(address: "@a", name: "a", description: "a"))
+      JSON.parse(dir.to_json(dir.lookup("svc").not_nil!)).as_h.has_key?("online").should be_false
+      a = JSON.parse(dir.to_json(dir.lookup("@a").not_nil!))
+      a["online"].as_bool.should be_true
+      a.as_h.has_key?("expires_at").should be_false
+    end
+
+    it "raises when setting presence on an unknown address" do
+      expect_raises(Arcana::Error, /no directory listing/) do
+        Arcana::Directory.new.set_online("@ghost", false)
+      end
+    end
+  end
 end
