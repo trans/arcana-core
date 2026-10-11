@@ -19,6 +19,10 @@ module Arcana
   #
   #   svc.start  # spawns a listener fiber
   #
+  # Requests run concurrently, at most `max_concurrent` at once (default
+  # 8; `nil` for no cap), so the handler must be safe to run at the same
+  # time. The listing reports busy while at least one is in flight. See
+  # `Dispatcher`.
   class Service
     getter address : String
 
@@ -31,11 +35,15 @@ module Arcana
       @schema : JSON::Any? = nil,
       @guide : String? = nil,
       @tags : Array(String) = [] of String,
+      max_concurrent : Int32? = Dispatcher::DEFAULT_MAX_CONCURRENT,
       &handler : JSON::Any -> JSON::Any
     )
       Directory.validate_address(@address)
       @handler = handler
       @running = false
+      directory = @directory
+      address = @address
+      @dispatcher = Dispatcher.new(max_concurrent, ->(busy : Bool) { directory.set_busy(address, busy) })
 
       @directory.register(Directory::Listing.new(
         address: @address,
@@ -51,20 +59,30 @@ module Arcana
       @mailbox = @bus.mailbox(@address)
     end
 
-    # Start listening for requests. Spawns a fiber.
+    # Start listening for requests. Spawns a fiber that hands each request
+    # to its own fiber, up to `max_concurrent` at once.
     def start
       return if @running
       @running = true
 
       spawn do
         while @running
-          envelope = @mailbox.receive
-          handle(envelope)
+          submit(@mailbox.receive)
         end
       end
     end
 
-    # Stop the service. It will finish processing the current request.
+    # The most requests that run at once (nil: no cap).
+    def max_concurrent : Int32?
+      @dispatcher.max_concurrent
+    end
+
+    # A method per envelope, so each fiber gets its own.
+    private def submit(envelope : Envelope) : Nil
+      @dispatcher.submit { handle(envelope) }
+    end
+
+    # Stop the service. Requests already running finish.
     def stop
       @running = false
       @directory.unregister(@address)
@@ -101,13 +119,10 @@ module Arcana
 
       # Execute handler
       begin
-        @directory.set_busy(@address, true)
         result = @handler.call(data)
         reply(envelope, Protocol.result(result))
       rescue ex
         reply(envelope, Protocol.error(ex.message || "Unknown error"))
-      ensure
-        @directory.set_busy(@address, false)
       end
     rescue ex
       # Guard against exceptions raised before the inner rescue (e.g.

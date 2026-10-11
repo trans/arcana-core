@@ -49,6 +49,13 @@ module Arcana
   # Same tool-registration API, same manifest shape, same dispatch. The
   # transport is the only thing that differs.
   #
+  # **Concurrency.** Requests run concurrently, each in its own fiber, at
+  # most `max_concurrent` at once (default 8; `nil` for no cap). Set it to
+  # what the backend your handlers call can take: `max_concurrent: 3` for
+  # a provider that asks for 2–4 concurrent requests. Handlers must be
+  # safe to run at the same time. The listing reports busy while at least
+  # one request is in flight. See `Dispatcher`.
+  #
   # Callers (from any transport):
   #   deliver to:"mj" payload:{"tool":"help"}
   #   → {"tools":[{"name":"pixelize","description":"...","inputSchema":{...}}, ...]}
@@ -85,6 +92,7 @@ module Arcana
     @directory : Directory?
     @mailbox : Mailbox?
     @client : Client?
+    @dispatcher : Dispatcher
 
     # In-process constructor: registers a listing on `directory` and
     # reads envelopes from a `Bus` mailbox.
@@ -95,6 +103,7 @@ module Arcana
       @name : String,
       @description : String,
       @tags : Array(String) = [] of String,
+      max_concurrent : Int32? = Dispatcher::DEFAULT_MAX_CONCURRENT,
     )
       Directory.validate_address(@address)
       @bus = bus
@@ -102,6 +111,8 @@ module Arcana
       @client = nil
       @tools = {} of String => Tool
       @running = false
+      address = @address
+      @dispatcher = Dispatcher.new(max_concurrent, ->(busy : Bool) { directory.set_busy(address, busy) })
 
       directory.register(Directory::Listing.new(
         address: @address,
@@ -128,7 +139,9 @@ module Arcana
       client : Client,
       name : String? = nil,
       description : String? = nil,
+      max_concurrent : Int32? = Dispatcher::DEFAULT_MAX_CONCURRENT,
     )
+      @dispatcher = Dispatcher.new(max_concurrent)
       @client = client
       @address = client.address
       @bus = nil
@@ -178,16 +191,30 @@ module Arcana
       if mb = @mailbox
         spawn do
           while @running
-            envelope = mb.receive
-            dispatch(envelope)
+            submit(mb.receive)
           end
         end
       elsif c = @client
+        # Never block the WebSocket read loop: it also carries replies.
         c.on_message do |envelope|
-          dispatch(envelope)
+          submit_nowait(envelope)
         end
         warn_unless_connected(c)
       end
+    end
+
+    # The most requests that run at once (nil: no cap).
+    def max_concurrent : Int32?
+      @dispatcher.max_concurrent
+    end
+
+    # A method per envelope, so each fiber gets its own.
+    private def submit(envelope : Envelope) : Nil
+      @dispatcher.submit { dispatch(envelope) }
+    end
+
+    private def submit_nowait(envelope : Envelope) : Nil
+      @dispatcher.submit_nowait { dispatch(envelope) }
     end
 
     # Start and serve until the connection closes. On Client transport
@@ -245,12 +272,9 @@ module Arcana
           Protocol.result(manifest)
         elsif tool_entry = @tools[tool_name]?
           begin
-            @directory.try &.set_busy(@address, true)
             Protocol.result(tool_entry.handler.call(data))
           rescue ex
             Protocol.error(ex.message || "handler crashed")
-          ensure
-            @directory.try &.set_busy(@address, false)
           end
         else
           known = @tools.keys.sort.join(", ")

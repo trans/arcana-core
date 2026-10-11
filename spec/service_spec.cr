@@ -302,4 +302,26 @@ describe Arcana::Service do
 
     dir.lookup("test:tmp").should be_nil
   end
+it "handles requests at the same time, up to max_concurrent" do
+    [{nil, 600.milliseconds, :under}, {1, 750.milliseconds, :over}].each do |cap, limit, side|
+      bus = Arcana::Bus.new
+      dir = Arcana::Directory.new
+      svc = Arcana::Service.new(bus: bus, directory: dir, address: "slow", name: "Slow",
+        description: "sleeps", max_concurrent: cap) { |_| sleep 200.milliseconds; JSON::Any.new("ok") }
+      svc.start
+      done = Channel(Nil).new(4)
+      t0 = Time.instant
+      4.times do |i|
+        spawn do
+          bus.request(Arcana::Envelope.new(from: "c#{i}", to: "slow", payload: JSON.parse("{}")),
+            timeout: 5.seconds).should_not be_nil
+          done.send(nil)
+        end
+      end
+      4.times { done.receive }
+      elapsed = Time.instant - t0
+      side == :under ? (elapsed.should be < limit) : (elapsed.should be >= limit)
+      svc.stop
+    end
+  end
 end
