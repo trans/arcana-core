@@ -1,4 +1,6 @@
 require "json"
+require "./error"
+require "./events"
 
 module Arcana
   # Registry of agent and service capabilities.

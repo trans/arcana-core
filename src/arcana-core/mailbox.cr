@@ -1,3 +1,7 @@
+require "./error"
+require "./envelope"
+require "./events"
+
 module Arcana
   # Raised when a bounded mailbox rejects a deliver because the queue
   # is at capacity. Bus surfaces this to the sender (delivery fails
