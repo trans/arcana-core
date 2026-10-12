@@ -85,6 +85,11 @@ end
 ```
 
 Code outside handlers can share the same locks with `ts.exclusive(:ledger)`.
+
+`exclusive` is for state the service owns. State that other code also
+touches, such as a log a CLI writes outside any service, should carry its
+own lock (a `Mutex` inside the log), so every caller is covered and the
+log doesn't depend on a toolset that may not exist when the CLI runs.
 `Service`, a single-purpose service registered in-process, has the same
 `max_concurrent:` and `exclusive`.
 

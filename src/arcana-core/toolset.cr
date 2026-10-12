@@ -85,6 +85,8 @@ module Arcana
   #   end
   #
   # Code outside handlers can share the same locks with `Toolset#exclusive`.
+  # That covers state the service owns; state other code also touches (a
+  # log a CLI writes too) should carry its own `Mutex`.
   #
   # Callers (from any transport):
   #   deliver to:"mj" payload:{"tool":"help"}

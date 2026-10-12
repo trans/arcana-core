@@ -22,6 +22,10 @@ module Arcana
     # runs a block under the same key; returns the block's value. Use it
     # for the shared part of a handler only, so the rest stays concurrent.
     # Locks are reentrant: a block may take the same key again.
+    #
+    # It's for state the service owns. State other code also touches (a
+    # log a CLI writes too, say) should carry its own `Mutex`, so every
+    # caller is covered, not only the handlers.
     def exclusive(key : String | Symbol = :default, &)
       @locks.synchronize(key.to_s) { yield }
     end
