@@ -22,7 +22,7 @@ module Arcana
   # Requests run concurrently, at most `max_concurrent` at once (default
   # 8; `nil` for no cap), so the handler must be safe to run at the same
   # time. The listing reports busy while at least one is in flight. See
-  # `Dispatcher`.
+  # `Dispatcher`, and `Toolset` on per-backend limits and shared state.
   class Service
     getter address : String
 

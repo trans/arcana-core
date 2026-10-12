@@ -56,6 +56,18 @@ module Arcana
   # safe to run at the same time. The listing reports busy while at least
   # one request is in flight. See `Dispatcher`.
   #
+  # - **The cap is per Toolset.** If its tools fan out to several
+  #   independent backends (separate provider pools, say), also limit each
+  #   backend inside the handlers, for instance with a buffered `Channel`
+  #   as a token bucket, and keep `max_concurrent` as a backstop. One
+  #   shared cap lets requests queued for a slow backend crowd out ones
+  #   another backend could serve.
+  # - **"Safe to run at the same time" matters even though fibers share
+  #   one thread:** any IO can yield partway through. Guard shared state
+  #   with a `Mutex`: an append-only log (two writes can interleave
+  #   mid-line), a counter read and written around a call, a cached client
+  #   with mutable state.
+  #
   # Callers (from any transport):
   #   deliver to:"mj" payload:{"tool":"help"}
   #   → {"tools":[{"name":"pixelize","description":"...","inputSchema":{...}}, ...]}
