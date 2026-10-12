@@ -20,11 +20,14 @@ module Arcana
   #   svc.start  # spawns a listener fiber
   #
   # Requests run concurrently, at most `max_concurrent` at once (default
-  # 8; `nil` for no cap), so the handler must be safe to run at the same
-  # time. The listing reports busy while at least one is in flight. See
-  # `Dispatcher`, and `Toolset` on per-backend limits and shared state.
+  # 8; `nil` for no cap). The listing reports busy while at least one is in
+  # flight. State the handler shares across requests belongs inside
+  # `ctx.exclusive` (the handler's optional second argument, a
+  # `HandlerContext`); see `Toolset` on shared state, and on lanes for a
+  # handler in front of several backends.
   class Service
     getter address : String
+    @locks = Locks.new
 
     def initialize(
       @bus : Bus,
@@ -36,7 +39,7 @@ module Arcana
       @guide : String? = nil,
       @tags : Array(String) = [] of String,
       max_concurrent : Int32? = Dispatcher::DEFAULT_MAX_CONCURRENT,
-      &handler : JSON::Any -> JSON::Any
+      &handler : JSON::Any, HandlerContext -> JSON::Any
     )
       Directory.validate_address(@address)
       @handler = handler
@@ -75,6 +78,12 @@ module Arcana
     # The most requests that run at once (nil: no cap).
     def max_concurrent : Int32?
       @dispatcher.max_concurrent
+    end
+
+    # Run the block while no handler run holds the same key (see
+    # `HandlerContext#exclusive`); returns its value.
+    def exclusive(key : String | Symbol = :default, &)
+      @locks.synchronize(key.to_s) { yield }
     end
 
     # A method per envelope, so each fiber gets its own.
@@ -119,7 +128,7 @@ module Arcana
 
       # Execute handler
       begin
-        result = @handler.call(data)
+        result = @handler.call(data, HandlerContext.new(envelope, @locks))
         reply(envelope, Protocol.result(result))
       rescue ex
         reply(envelope, Protocol.error(ex.message || "Unknown error"))

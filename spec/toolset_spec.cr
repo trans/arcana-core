@@ -380,4 +380,97 @@ describe "concurrency" do
       end
     end
   end
+describe "lanes and exclusive" do
+    # Fires one request per payload at once; returns each reply's arrival
+    # time (in request order) and the total.
+    fire = ->(bus : Arcana::Bus, to : String, payloads : Array(String)) {
+      done = Channel({Int32, Time::Span}).new(payloads.size)
+      t0 = Time.instant
+      payloads.each_with_index do |p, i|
+        spawn do
+          reply = bus.request(Arcana::Envelope.new(from: "c#{i}", to: to, payload: JSON.parse(p)), timeout: 5.seconds)
+          reply.should_not be_nil
+          done.send({i, Time.instant - t0})
+        end
+      end
+      times = Array.new(payloads.size, Time::Span.zero)
+      payloads.size.times { i, at = done.receive; times[i] = at }
+      times
+    }
+
+    it "loses updates without exclusive; exclusive keeps them and the rest concurrent" do
+      [false, true].each do |guarded|
+        bus = Arcana::Bus.new
+        ts = Arcana::Toolset.new(bus: bus, directory: Arcana::Directory.new, address: "count",
+          name: "Count", description: "d", max_concurrent: nil)
+        counter = 0
+        ts.tool("add", "adds one") do |_, ctx|
+          sleep 100.milliseconds # the slow, independent part
+          bump = -> { v = counter; sleep 5.milliseconds; counter = v + 1 }
+          guarded ? ctx.exclusive(:counter) { bump.call } : bump.call
+          JSON::Any.new(counter.to_i64)
+        end
+        ts.start
+        times = fire.call(bus, "count", Array.new(5, %({"tool":"add"})))
+        if guarded
+          counter.should eq(5)
+          times.max.should be < 300.milliseconds # the 100 ms part overlapped
+        else
+          counter.should be < 5 # the race is real
+        end
+      end
+    end
+
+    it "keeps different keys independent, and nests the same key" do
+      bus = Arcana::Bus.new
+      ts = Arcana::Toolset.new(bus: bus, directory: Arcana::Directory.new, address: "keys",
+        name: "Keys", description: "d", max_concurrent: nil)
+      ts.tool("hold", "holds its key") do |data, ctx|
+        ctx.exclusive(data["key"].as_s) { ctx.exclusive(data["key"].as_s) { sleep 100.milliseconds } }
+        JSON::Any.new(ctx.envelope.from)
+      end
+      ts.start
+      fire.call(bus, "keys", [%({"tool":"hold","key":"a"}), %({"tool":"hold","key":"b"})]).max
+        .should be < 180.milliseconds
+    end
+
+    it "shares its locks with Toolset#exclusive" do
+      bus = Arcana::Bus.new
+      ts = Arcana::Toolset.new(bus: bus, directory: Arcana::Directory.new, address: "shared",
+        name: "Shared", description: "d")
+      ts.tool("touch", "takes the ledger") { |_, ctx| ctx.exclusive(:ledger) { JSON::Any.new("ok") } }
+      ts.start
+      spawn { ts.exclusive(:ledger) { sleep 150.milliseconds } }
+      sleep 10.milliseconds
+      fire.call(bus, "shared", [%({"tool":"touch"})])[0].should be >= 120.milliseconds
+    end
+
+    it "lets a busy lane wait without holding the toolset's slots" do
+      bus = Arcana::Bus.new
+      ts = Arcana::Toolset.new(bus: bus, directory: Arcana::Directory.new, address: "cam",
+        name: "Cam", description: "d", max_concurrent: 2)
+      ts.lane("slow", max_concurrent: 1)
+      ts.tool("shoot", "takes 200 ms", lane: ->(data : JSON::Any) { data["backend"]?.try(&.as_s?) }) do |_|
+        sleep 200.milliseconds
+        JSON::Any.new("ok")
+      end
+      ts.start
+      slow = %({"tool":"shoot","backend":"slow"})
+      times = fire.call(bus, "cam", [slow, slow, slow, %({"tool":"shoot","backend":"fast"})])
+      times[3].should be < 350.milliseconds # one shared cap would have queued it behind slow ones
+      times[0, 3].max.should be >= 550.milliseconds # the slow lane ran one at a time
+    end
+
+    it "takes a fixed lane per tool, and serves requests whose lane function raises" do
+      bus = Arcana::Bus.new
+      ts = Arcana::Toolset.new(bus: bus, directory: Arcana::Directory.new, address: "fixed",
+        name: "Fixed", description: "d", max_concurrent: nil)
+      ts.lane("one", max_concurrent: 1)
+      ts.tool("nap", "takes 100 ms", lane: "one") { |_| sleep 100.milliseconds; JSON::Any.new("ok") }
+      ts.tool("odd", "lane function raises", lane: ->(d : JSON::Any) { raise "no lane"; nil.as(String?) }) { |_| JSON::Any.new("ok") }
+      ts.start
+      fire.call(bus, "fixed", [%({"tool":"nap"}), %({"tool":"nap"})]).max.should be >= 190.milliseconds
+      fire.call(bus, "fixed", [%({"tool":"odd"})])[0].should be < 1.second
+    end
+  end
 end

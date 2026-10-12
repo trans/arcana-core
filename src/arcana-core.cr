@@ -6,6 +6,7 @@ require "./arcana-core/directory"
 require "./arcana-core/mailbox"
 require "./arcana-core/bus"
 require "./arcana-core/dispatcher"
+require "./arcana-core/handler_context"
 require "./arcana-core/service"
 require "./arcana-core/toolset"
 require "./arcana-core/client"
@@ -14,6 +15,6 @@ require "./arcana-core/state_backend"
 
 module Arcana
   module Core
-    VERSION = "0.17.1"
+    VERSION = "0.18.0"
   end
 end

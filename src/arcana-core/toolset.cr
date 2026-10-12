@@ -52,21 +52,39 @@ module Arcana
   # **Concurrency.** Requests run concurrently, each in its own fiber, at
   # most `max_concurrent` at once (default 8; `nil` for no cap). Set it to
   # what the backend your handlers call can take: `max_concurrent: 3` for
-  # a provider that asks for 2–4 concurrent requests. Handlers must be
-  # safe to run at the same time. The listing reports busy while at least
-  # one request is in flight. See `Dispatcher`.
+  # a provider that asks for 2–4 concurrent requests. The listing reports
+  # busy while at least one request is in flight. See `Dispatcher`.
   #
-  # - **The cap is per Toolset.** If its tools fan out to several
-  #   independent backends (separate provider pools, say), also limit each
-  #   backend inside the handlers, for instance with a buffered `Channel`
-  #   as a token bucket, and keep `max_concurrent` as a backstop. One
-  #   shared cap lets requests queued for a slow backend crowd out ones
-  #   another backend could serve.
-  # - **"Safe to run at the same time" matters even though fibers share
-  #   one thread:** any IO can yield partway through. Guard shared state
-  #   with a `Mutex`: an append-only log (two writes can interleave
-  #   mid-line), a counter read and written around a call, a cached client
-  #   with mutable state.
+  # **Lanes, for a toolset in front of several backends.** One cap for the
+  # whole toolset lets requests queued for a slow backend crowd out ones
+  # another backend could serve. Give each backend a lane with its own
+  # cap, and say which lane a request takes, fixed per tool or worked out
+  # from its data:
+  #
+  #   ts.lane("runware", max_concurrent: 3)
+  #   ts.lane("google", max_concurrent: 6)
+  #   ts.tool("shoot", "Take a picture",
+  #     lane: ->(data : JSON::Any) { backend_for(data) }) { |data| ... }
+  #
+  # A request waits for its lane before it takes one of the toolset's
+  # slots, so waiting on a busy lane blocks no one else; `max_concurrent`
+  # stays the overall backstop. The lane function runs before the
+  # handler: keep it quick, and return nil for no lane.
+  #
+  # **Shared state.** Handlers run at the same time, and even though
+  # fibers share one thread, any IO can pause one partway through while
+  # another runs. State they share (an append-only log, a counter read
+  # and written around a call, a cached client) belongs inside
+  # `ctx.exclusive`, which runs one block at a time per key and leaves the
+  # rest of the handler concurrent:
+  #
+  #   ts.tool("shoot", "Take a picture") do |data, ctx|
+  #     image = camera.shoot(data)
+  #     ctx.exclusive(:ledger) { ledger << cost }
+  #     image
+  #   end
+  #
+  # Code outside handlers can share the same locks with `Toolset#exclusive`.
   #
   # Callers (from any transport):
   #   deliver to:"mj" payload:{"tool":"help"}
@@ -79,9 +97,10 @@ module Arcana
       getter name : String
       getter description : String
       getter input_schema : JSON::Any?
-      getter handler : Proc(JSON::Any, JSON::Any)
+      getter lane : String | Proc(JSON::Any, String?) | Nil
+      getter handler : Proc(JSON::Any, HandlerContext, JSON::Any)
 
-      def initialize(@name, @description, @input_schema, @handler)
+      def initialize(@name, @description, @input_schema, @lane, @handler)
       end
 
       def to_manifest_entry : JSON::Any
@@ -105,6 +124,7 @@ module Arcana
     @mailbox : Mailbox?
     @client : Client?
     @dispatcher : Dispatcher
+    @locks = Locks.new
 
     # In-process constructor: registers a listing on `directory` and
     # reads envelopes from a `Bus` mailbox.
@@ -166,15 +186,29 @@ module Arcana
       @running = false
     end
 
-    # Register a tool. Add all tools before calling `start`.
+    # Register a tool. Add all tools before calling `start`. The handler
+    # takes the request's data and, optionally, a `HandlerContext`. `lane`
+    # names the lane its requests take, or works it out from their data.
     def tool(
       name : String,
       description : String,
       input_schema : JSON::Any? = nil,
-      &handler : JSON::Any -> JSON::Any
+      lane : String | Proc(JSON::Any, String?) | Nil = nil,
+      &handler : JSON::Any, HandlerContext -> JSON::Any
     )
       raise Error.new("tool name 'help' is reserved; the manifest is generated automatically") if name == "help"
-      @tools[name] = Tool.new(name, description, input_schema, handler)
+      @tools[name] = Tool.new(name, description, input_schema, lane, handler)
+    end
+
+    # Cap a lane: requests in it run at most `max_concurrent` at once.
+    def lane(name : String, max_concurrent : Int32) : Nil
+      @dispatcher.limit_lane(name, max_concurrent)
+    end
+
+    # Run the block while no handler of this toolset runs one under the
+    # same key (see `HandlerContext#exclusive`); returns its value.
+    def exclusive(key : String | Symbol = :default, &)
+      @locks.synchronize(key.to_s) { yield }
     end
 
     # Return the tool manifest.
@@ -220,13 +254,32 @@ module Arcana
       @dispatcher.max_concurrent
     end
 
-    # A method per envelope, so each fiber gets its own.
+    # A method per envelope, so each fiber gets its own. In-process, the
+    # mailbox reader waits for a slot, unless requests take lanes: then
+    # each waits in its own fiber, so one busy lane can't stall the reader.
     private def submit(envelope : Envelope) : Nil
-      @dispatcher.submit { dispatch(envelope) }
+      if lanes?
+        submit_nowait(envelope)
+      else
+        @dispatcher.submit { dispatch(envelope) }
+      end
     end
 
     private def submit_nowait(envelope : Envelope) : Nil
-      @dispatcher.submit_nowait { dispatch(envelope) }
+      @dispatcher.submit_nowait(-> { lane_for(envelope) }) { dispatch(envelope) }
+    end
+
+    private def lanes? : Bool
+      @dispatcher.lanes? || @tools.each_value.any?(&.lane)
+    end
+
+    private def lane_for(envelope : Envelope) : String?
+      data = extract_data(envelope.payload)
+      tool = @tools[data.str?("tool") || ""]?
+      case lane = tool.try(&.lane)
+      when String then lane
+      when Proc   then lane.call(data)
+      end
     end
 
     # Start and serve until the connection closes. On Client transport
@@ -284,7 +337,7 @@ module Arcana
           Protocol.result(manifest)
         elsif tool_entry = @tools[tool_name]?
           begin
-            Protocol.result(tool_entry.handler.call(data))
+            Protocol.result(tool_entry.handler.call(data, HandlerContext.new(envelope, @locks)))
           rescue ex
             Protocol.error(ex.message || "handler crashed")
           end

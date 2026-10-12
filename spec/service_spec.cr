@@ -324,4 +324,25 @@ it "handles requests at the same time, up to max_concurrent" do
       svc.stop
     end
   end
+it "gives the handler exclusive for shared state" do
+    bus = Arcana::Bus.new
+    counter = 0
+    svc = Arcana::Service.new(bus: bus, directory: Arcana::Directory.new, address: "tally", name: "Tally",
+      description: "d", max_concurrent: nil) do |_, ctx|
+      sleep 50.milliseconds
+      ctx.exclusive { v = counter; sleep 5.milliseconds; counter = v + 1 }
+      JSON::Any.new(counter.to_i64)
+    end
+    svc.start
+    done = Channel(Nil).new(5)
+    5.times do |i|
+      spawn do
+        bus.request(Arcana::Envelope.new(from: "c#{i}", to: "tally", payload: JSON.parse("{}")), timeout: 5.seconds)
+        done.send(nil)
+      end
+    end
+    5.times { done.receive }
+    counter.should eq(5)
+    svc.exclusive { counter }.should eq(5)
+  end
 end
