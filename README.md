@@ -116,7 +116,7 @@ bus.subscribe("#releases", "@mj")                   # optional
   typo (`#release`) fails instead of vanishing. Names take the `#`
   sigil, and may have dot-separated parts (`#arcana.releases`).
 - **Retention.** A topic keeps its newest `retention` posts (10,000 by
-  default) and drops older ones. `read` skips posts already dropped:
+  default, 100,000 at most) and drops older ones. `read` skips posts already dropped:
   when `log.first` is past `after + 1`, the reader missed some.
 - **Seeing what's new.** A topic's directory listing shows `last_seq`
   and `last_published_at`. A reader compares those with the last number

@@ -56,8 +56,9 @@ describe Arcana::TopicLog do
     log.read.map(&.seq).should eq([5])
   end
 
-  it "rejects a retention under one post" do
-    expect_raises(Arcana::Error, /at least 1/) { Arcana::TopicLog.new("#news", retention: 0) }
+  it "rejects a retention under one post or over the maximum" do
+    expect_raises(Arcana::Error, /from 1 to 100000/) { Arcana::TopicLog.new("#news", retention: 0) }
+    expect_raises(Arcana::Error, /from 1 to 100000/) { Arcana::TopicLog.new("#news", retention: 100_001) }
   end
 
   it "restores from a dump" do

@@ -9,6 +9,9 @@ module Arcana
   class TopicLog
     DEFAULT_RETENTION = 10_000
 
+    # The most posts a topic may keep: every kept post is in memory.
+    MAX_RETENTION = 100_000
+
     # A post and its number in the topic.
     record Post, seq : Int64, envelope : Envelope
 
@@ -22,8 +25,10 @@ module Arcana
       @mutex = Mutex.new
     end
 
-    def self.check_retention!(retention : Int32) : Nil
-      raise Error.new("retention must be at least 1 post, got #{retention}") if retention < 1
+    def self.check_retention!(retention : Int) : Nil
+      unless 1 <= retention <= MAX_RETENTION
+        raise Error.new("retention must be from 1 to #{MAX_RETENTION} posts, got #{retention}")
+      end
     end
 
     # The newest post's number; 0 before the first post.
