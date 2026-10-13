@@ -16,6 +16,9 @@ module Arcana
   #     service), and capability is the substring after the colon.
   #   - Internal ephemeral mailboxes (`_reply:<id>`) are carved out by a
   #     leading underscore and are neither agents nor services.
+  #   - Topics (`#news`, `#arcana.releases`) are shared logs: see
+  #     `TopicLog` and `Bus#publish`. Their names may have dot-separated
+  #     parts.
   class Directory
     # Token body: what an address (or each half of a colon-form address)
     # must match after any leading sigil is stripped.
@@ -31,22 +34,43 @@ module Arcana
     # tell at a glance who's an agent.
     AGENT_HANDLE_PATTERN = /\A@[a-z][a-z0-9-]*\z/
 
+    # Topics use the leading `#` sigil, and their names may have
+    # dot-separated parts: `#news`, `#arcana.releases`.
+    TOPIC_PATTERN = /\A#[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*\z/
+
     enum Kind
       Agent
       Service
+      Topic
 
       # Best-guess kind from address shape. Used as a fallback when the
       # caller doesn't pass an explicit `kind:`. Precedence:
       #   @foo   → Agent
+      #   #foo   → Topic
       #   foo:x  → Service
       #   foo    → Service (bare non-colon defaults to service — a bare
       #           token is a Toolset or single-purpose service; agents
       #           require the `@` sigil).
       def self.from_address(address : String) : self
         return Agent if address.starts_with?('@')
+        return Topic if address.starts_with?('#')
         Service
       end
+
+      # The kind named by `name` ("agent", "service", "topic"), or nil.
+      def self.from_name?(name : String?) : self?
+        case name
+        when "agent"   then Agent
+        when "service" then Service
+        when "topic"   then Topic
+        end
+      end
     end
+
+    # What a topic's listing shows beyond its registration: its newest
+    # post's number and time, and how many subscribe. The bus that keeps
+    # the topics supplies it (see `topic_status`).
+    record TopicStatus, last_seq : Int64, last_published_at : Time?, subscribers : Int32
 
     struct Listing
       property address : String
@@ -56,6 +80,10 @@ module Arcana
       property schema : JSON::Any?
       property guide : String?
       property tags : Array(String)
+
+      # How many posts a topic keeps (`TopicLog::DEFAULT_RETENTION` when
+      # nil). Topics only.
+      property retention : Int32?
 
       # In-memory only. `true` = registered by code inside the daemon
       # (Service.new / Toolset.new); these should NOT be persisted to
@@ -74,6 +102,7 @@ module Arcana
         @guide : String? = nil,
         @tags : Array(String) = [] of String,
         @ephemeral : Bool = false,
+        @retention : Int32? = nil,
       )
         @kind = kind || Kind.from_address(@address)
       end
@@ -87,6 +116,7 @@ module Arcana
           json.field "schema", @schema if @schema
           json.field "guide", @guide if @guide
           json.field "tags", @tags unless @tags.empty?
+          json.field "retention", @retention if @retention
         end
       end
     end
@@ -108,6 +138,10 @@ module Arcana
     # (register, unregister, busy changes, prune) emit events.
     property events : Events::Backend?
 
+    # Supplies a topic's `TopicStatus` for its listing. `Bus#directory=`
+    # sets it; without it, topic listings show only their registration.
+    property topic_status : Proc(String, TopicStatus?)?
+
     # Is this address a service? (Contains `:` and is not an internal ephemeral.)
     def self.service?(address : String) : Bool
       return false if address.starts_with?('_')
@@ -116,8 +150,13 @@ module Arcana
 
     # Is this address an agent? (Plain name, no colon.)
     def self.agent?(address : String) : Bool
-      return false if address.starts_with?('_')
+      return false if address.starts_with?('_') || topic?(address)
       !address.includes?(':')
+    end
+
+    # Is this address a topic? (Leading `#` sigil.)
+    def self.topic?(address : String) : Bool
+      address.starts_with?('#')
     end
 
     # Return the owner half of a service address, or nil if not a service.
@@ -129,12 +168,15 @@ module Arcana
     # Validate address format. Raises if malformed. Accepts:
     #   - `foo` — bare single token
     #   - `@foo` — agent-handle single token (leading `@` sigil)
+    #   - `#foo`, `#foo.bar` — topic (leading `#` sigil, dot-separated parts)
     #   - `owner:capability` — two-token colon form (`@` not allowed here)
     #   - `_reply:<hex>` — internal ephemeral, exempt from validation
     def self.validate_address(address : String) : Nil
       return if address.starts_with?("_reply:") # internal ephemeral
 
-      if address.includes?(':')
+      if address.starts_with?('#')
+        raise Error.new("invalid topic #{address.inspect}: `#` must be followed by names matching #{NAME_PATTERN.source}, separated by dots") unless address =~ TOPIC_PATTERN
+      elsif address.includes?(':')
         raise Error.new("invalid address #{address.inspect}: `@` sigil is for single-token agent handles, not colon-form service addresses") if address.starts_with?('@')
         parts = address.split(':', 2)
         raise Error.new("invalid address #{address.inspect}: colon-form must be two tokens") unless parts.size == 2
@@ -153,12 +195,18 @@ module Arcana
       address.starts_with?('@')
     end
 
-    # Enforce the sigil convention: agent addresses must use `@`,
-    # service addresses must not. Internal `_reply:` mailboxes are
-    # never routed through this path.
+    # Enforce the sigil convention: agent addresses must use `@`, topic
+    # addresses `#`, and service addresses neither. Internal `_reply:`
+    # mailboxes are never routed through this path.
     private def validate_kind_and_sigil!(address : String, kind : Kind) : Nil
       case kind
       when Kind::Agent
+        if Directory.topic?(address)
+          raise Error.new(
+            "agent addresses must use the `@` sigil — got #{address.inspect}. " \
+            "The `#` prefix is reserved for topics: set kind: \"topic\" to register one."
+          )
+        end
         unless address.starts_with?('@')
           raise Error.new(
             "agent addresses must use the `@` sigil — got #{address.inspect}. " \
@@ -170,6 +218,18 @@ module Arcana
           raise Error.new(
             "service addresses must not use the `@` sigil — got #{address.inspect}. " \
             "The `@` prefix is reserved for agent handles. Drop the prefix, or set kind: \"agent\" if this is a conversational identity."
+          )
+        end
+        if Directory.topic?(address)
+          raise Error.new(
+            "service addresses must not use the `#` sigil — got #{address.inspect}. " \
+            "The `#` prefix is reserved for topics: set kind: \"topic\" to register one."
+          )
+        end
+      when Kind::Topic
+        unless Directory.topic?(address)
+          raise Error.new(
+            "topic addresses must use the `#` sigil — got #{address.inspect}. Register as `##{address.lchop('@')}` instead."
           )
         end
       end
@@ -291,6 +351,7 @@ module Arcana
         guide: new.guide || old.guide,
         tags: new.tags.empty? ? old.tags : new.tags,
         ephemeral: new.ephemeral,
+        retention: new.retention || old.retention,
       )
     end
 
@@ -495,21 +556,16 @@ module Arcana
 
     # Summarize the directory as JSON — useful for injecting into agent prompts.
     def to_json : String
-      JSON.build do |json|
-        json.array do
-          @mutex.synchronize do
-            @listings.each_value { |l| listing_to_json(l, json) }
-          end
-        end
-      end
+      to_json(list)
     end
 
     # Serialize a list of listings with busy status.
     def to_json(listings : Array(Listing)) : String
+      statuses = topic_statuses(listings)
       JSON.build do |json|
         json.array do
           @mutex.synchronize do
-            listings.each { |l| listing_to_json(l, json) }
+            listings.each { |l| listing_to_json(l, json, statuses[l.address]?) }
           end
         end
       end
@@ -517,9 +573,25 @@ module Arcana
 
     # Serialize a single listing with busy status.
     def to_json(listing : Listing) : String
+      status = topic_statuses([listing])[listing.address]?
       JSON.build do |json|
-        @mutex.synchronize { listing_to_json(listing, json) }
+        @mutex.synchronize { listing_to_json(listing, json, status) }
       end
+    end
+
+    # The topics' statuses, fetched before taking the directory's lock:
+    # the bus that supplies them takes its own.
+    private def topic_statuses(listings : Array(Listing)) : Hash(String, TopicStatus)
+      statuses = {} of String => TopicStatus
+      if fetch = @topic_status
+        listings.each do |l|
+          next unless l.kind.topic?
+          if status = fetch.call(l.address)
+            statuses[l.address] = status
+          end
+        end
+      end
+      statuses
     end
 
     # Save all listings to a JSON file.
@@ -550,11 +622,7 @@ module Arcana
             next
           end
           next if @listings.has_key?(address)
-          kind_str = entry["kind"]?.try(&.as_s?)
-          kind = case kind_str
-                 when "service" then Kind::Service
-                 when "agent"   then Kind::Agent
-                 end
+          kind = Kind.from_name?(entry["kind"]?.try(&.as_s?))
           # Legacy snapshots may still carry a `capability` field; we ignore
           # it — capability is no longer a first-class Listing field.
           @listings[address] = Listing.new(
@@ -565,6 +633,7 @@ module Arcana
             schema: entry["schema"]?,
             guide: entry["guide"]?.try(&.as_s?),
             tags: entry["tags"]?.try(&.as_a?.try(&.map(&.as_s))) || [] of String,
+            retention: entry["retention"]?.try(&.as_i?),
           )
           count += 1
         end
@@ -605,13 +674,23 @@ module Arcana
       end
     end
 
-    private def listing_to_json(l : Listing, json : JSON::Builder) : Nil
+    private def listing_to_json(l : Listing, json : JSON::Builder, status : TopicStatus? = nil) : Nil
       json.object do
         json.field "address", l.address
         json.field "name", l.name
         json.field "description", l.description
         json.field "kind", l.kind.to_s.downcase
-        json.field "busy", @busy[l.address]? || false
+        json.field "busy", @busy[l.address]? || false unless l.kind.topic?
+        if l.kind.topic?
+          # `last_seq` lets a reader see a new post without subscribing:
+          # read with `after:` the last number it saw.
+          json.field "retention", l.retention || TopicLog::DEFAULT_RETENTION
+          json.field "last_seq", status.try(&.last_seq) || 0_i64
+          if at = status.try(&.last_published_at)
+            json.field "last_published_at", at.to_rfc3339
+          end
+          json.field "subscribers", status.try(&.subscribers) || 0
+        end
         if l.kind.agent?
           json.field "online", !@offline.includes?(l.address)
           if seen = @last_seen[l.address]?

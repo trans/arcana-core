@@ -1,10 +1,13 @@
 module Arcana
   # Central message router for agent-to-agent communication.
   #
-  # Supports direct delivery (send) and fan-out (publish/subscribe).
-  # Addresses are resolved through the directory when available —
-  # bare names like "memo" resolve to "memo:agent" or "memo:service"
-  # if unambiguous.
+  # Supports direct delivery (send) and topics (publish/subscribe).
+  # A `#topic` is a shared log: publishing stores a post once, anyone
+  # reads it with `topic_log(topic).read(after:)`, and subscribers get a
+  # short notification of each post. Other topic names fan a full copy
+  # out to each subscriber (the older form). Addresses are resolved
+  # through the directory when available — bare names like "memo"
+  # resolve to "memo:agent" or "memo:service" if unambiguous.
   #
   #   bus = Arcana::Bus.new
   #   writer = bus.mailbox("writer:agent")
@@ -18,8 +21,16 @@ module Arcana
 
     @mailboxes = {} of String => Mailbox
     @subscriptions = {} of String => Set(String)
+    @topics = {} of String => TopicLog
     @mutex = Mutex.new
-    property directory : Directory?
+    getter directory : Directory?
+
+    # Topics are registered in the directory, and their listings show
+    # each topic's newest post, so the directory asks the bus for that.
+    def directory=(directory : Directory?)
+      @directory = directory
+      directory.try &.topic_status = ->(address : String) { topic_status(address) }
+    end
 
     # Default max queue length for newly created mailboxes. `nil` means
     # unbounded (the historical default). Set via bin/arcana.cr from
@@ -43,8 +54,10 @@ module Arcana
     # Fanout cost: one extra Mailbox#deliver per subscriber per send.
     property system_topics : Bool = false
 
-    # Get or create a mailbox for an address.
+    # Get or create a mailbox for an address. Topics have none: see
+    # `topic_log`.
     def mailbox(address : String) : Mailbox
+      raise Error.new("#{address} is a topic, which has a log instead of a mailbox") if Directory.topic?(address)
       @mutex.synchronize do
         mb = @mailboxes[address]?
         unless mb
@@ -120,6 +133,7 @@ module Arcana
     # Send an envelope to its `to` address. Raises if no mailbox exists,
     # or `MailboxFull` if the recipient's queue is at capacity.
     def send(envelope : Envelope)
+      raise Error.new("#{envelope.to} is a topic: publish to it instead") if Directory.topic?(envelope.to)
       mb = @mutex.synchronize { @mailboxes[envelope.to]? }
       raise Error.new("No mailbox for address: #{envelope.to}") unless mb
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
@@ -224,10 +238,66 @@ module Arcana
       envelope.correlation_id
     end
 
+    # -- Topics --
+
+    # The log of a registered `#topic`, created on first use. Raises
+    # unless the directory lists `address` as a topic. Its retention
+    # follows the listing's.
+    def topic_log(address : String) : TopicLog
+      listing = @directory.try(&.lookup(address))
+      unless listing && listing.kind.topic?
+        raise Error.new("no topic #{address} on the bus: register it first, with kind \"topic\"")
+      end
+      retention = listing.retention || TopicLog::DEFAULT_RETENTION
+      log = @mutex.synchronize { @topics[address] ||= TopicLog.new(address, retention) }
+      log.retention = retention unless log.retention == retention
+      log
+    end
+
+    # The log of a `#topic`, if it has one yet.
+    def topic_log?(address : String) : TopicLog?
+      @mutex.synchronize { @topics[address]? }
+    end
+
+    # Every topic log, for a snapshot.
+    def topic_logs : Array(TopicLog)
+      @mutex.synchronize { @topics.values }
+    end
+
+    # Drop a topic's log and subscriptions (when it's unregistered).
+    def remove_topic(address : String) : Nil
+      @mutex.synchronize do
+        @topics.delete(address)
+        @subscriptions.delete(address)
+      end
+    end
+
+    # Set a topic's subscribers as a snapshot recorded them, without the
+    # checks `subscribe` makes.
+    def restore_subscribers(topic : String, addresses : Array(String)) : Nil
+      @mutex.synchronize { @subscriptions[topic] = addresses.to_set }
+    end
+
+    # What a topic's directory listing shows: its newest post and how
+    # many subscribe. Nil before its log exists.
+    def topic_status(address : String) : Directory::TopicStatus?
+      log = topic_log?(address)
+      return unless log
+      Directory::TopicStatus.new(log.head, log.published_at, subscribers(address).size)
+    end
+
     # -- Pub/Sub --
 
-    # Subscribe an address to a topic.
-    def subscribe(topic : String, address : String)
+    # Subscribe an address to a topic. For a `#topic`, the topic must be
+    # registered and the subscriber must have a mailbox, since that's
+    # where notifications go. `cadence` is how often to be told:
+    # only `"always"` (on every post) exists so far.
+    def subscribe(topic : String, address : String, cadence : String = "always")
+      if Directory.topic?(topic)
+        topic_log(topic)
+        raise Error.new("cadence #{cadence.inspect} isn't implemented yet: only \"always\"") unless cadence == "always"
+        raise Error.new("#{address} has no mailbox on the bus to notify: register it first") unless has_mailbox?(address)
+      end
       @mutex.synchronize do
         (@subscriptions[topic] ||= Set(String).new) << address
       end
@@ -260,9 +330,16 @@ module Arcana
       end
     end
 
-    # Publish an envelope to all subscribers of a topic.
-    # The envelope's `to` is set to each subscriber's address on delivery.
-    def publish(topic : String, envelope : Envelope)
+    # Publish an envelope to a topic.
+    #
+    # For a `#topic`, the post is stored once in the topic's log and its
+    # number returned; each subscriber gets a short notification (see
+    # `notify_subscribers`). Raises unless the topic is registered.
+    #
+    # For any other topic name, each subscriber gets a full copy, with
+    # `to` set to its address, and nil is returned.
+    def publish(topic : String, envelope : Envelope) : Int64?
+      return publish_post(topic, envelope) if Directory.topic?(topic)
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
       subs = @mutex.synchronize { @subscriptions[topic]?.try(&.dup) }
       return unless subs
@@ -289,6 +366,65 @@ module Arcana
         correlation_id: envelope.correlation_id,
         metadata: {"subscribers" => JSON::Any.new(delivered_to.to_i64)} of String => JSON::Any,
       ))
+      nil
+    end
+
+    private def publish_post(topic : String, envelope : Envelope) : Int64
+      log = topic_log(topic)
+      @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
+      post = Envelope.new(
+        from: envelope.from,
+        to: topic,
+        subject: envelope.subject,
+        payload: envelope.payload,
+        correlation_id: envelope.correlation_id,
+        reply_to: envelope.reply_to,
+        timestamp: envelope.timestamp,
+      )
+      seq = log.append(post)
+      notified = notify_subscribers(topic, post, seq)
+      @events.try &.record(Events::Event.new(
+        type: "topic.published",
+        subject: topic,
+        object: (post.from.empty? ? nil : post.from),
+        correlation_id: post.correlation_id,
+        metadata: {
+          "seq"         => JSON::Any.new(seq),
+          "subscribers" => JSON::Any.new(notified.to_i64),
+        } of String => JSON::Any,
+      ))
+      seq
+    end
+
+    # Tell each subscriber of `topic` about a post, without the post's
+    # payload: the notification comes from the topic (so `from` starts
+    # with `#`), carries the post's subject, and its payload says where
+    # to read the post: `{topic, seq, from, subject, correlation_id}`.
+    # Best-effort: a subscriber whose mailbox is full misses the
+    # notification, and can still read the post from the log. Returns
+    # how many were notified.
+    private def notify_subscribers(topic : String, post : Envelope, seq : Int64) : Int32
+      subs = @mutex.synchronize { @subscriptions[topic]?.try(&.dup) }
+      return 0 unless subs
+      payload = JSON::Any.new({
+        "topic"          => JSON::Any.new(topic),
+        "seq"            => JSON::Any.new(seq),
+        "from"           => JSON::Any.new(post.from),
+        "subject"        => JSON::Any.new(post.subject),
+        "correlation_id" => JSON::Any.new(post.correlation_id),
+      } of String => JSON::Any)
+      subject = post.subject.empty? ? "post #{seq}" : post.subject
+      notified = 0
+      subs.each do |address|
+        mb = @mutex.synchronize { @mailboxes[address]? }
+        next unless mb
+        begin
+          mb.deliver(Envelope.new(from: topic, to: address, subject: subject, payload: payload))
+          notified += 1
+        rescue MailboxFull
+        end
+      end
+      notified
     end
 
     # -- Unified delivery --
