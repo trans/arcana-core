@@ -246,7 +246,7 @@ module Arcana
     def topic_log(address : String) : TopicLog
       listing = @directory.try(&.lookup(address))
       unless listing && listing.kind.topic?
-        raise Error.new("no topic #{address} on the bus: register it first, with kind \"topic\"")
+        raise Error.new("no topic #{address} on the bus: register it first, with kind \"topic\".")
       end
       retention = listing.retention || TopicLog::DEFAULT_RETENTION
       log = @mutex.synchronize { @topics[address] ||= TopicLog.new(address, retention) }
