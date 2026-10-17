@@ -355,6 +355,8 @@ module Arcana
           payload: envelope.payload,
           correlation_id: envelope.correlation_id,
           reply_to: envelope.reply_to,
+          id: envelope.id,
+          re: envelope.re,
         )
         mb.deliver(msg)
         delivered_to += 1
@@ -380,6 +382,8 @@ module Arcana
         correlation_id: envelope.correlation_id,
         reply_to: envelope.reply_to,
         timestamp: envelope.timestamp,
+        id: envelope.id,
+        re: envelope.re,
       )
       seq = log.append(post)
       notified = notify_subscribers(topic, post, seq)
@@ -477,6 +481,8 @@ module Arcana
         payload: envelope.payload,
         correlation_id: envelope.correlation_id,
         reply_to: reply_address,
+        id: envelope.id,
+        re: envelope.re,
       )
 
       send(msg)

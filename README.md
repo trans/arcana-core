@@ -131,6 +131,25 @@ bus.subscribe("#releases", "@mj")                   # optional
 Other topic names (no `#`) keep the older behavior: no registration, and
 each subscriber gets a full copy of each post.
 
+## Message ids and replies
+
+An envelope can carry two mail headers, in the sense of the dot-ai mail
+spec, which the bus passes along and never sets itself:
+
+- `id`: the message's own id, hex, 8 digits or more. It's the same on
+  the sender's and the recipient's copy, whatever carried the message.
+  It isn't the `correlation_id`, which a request and its reply share.
+- `re`: what the message answers, a message's `id` or a topic's post as
+  `#topic:<seq>` (`#releases:3`).
+
+```crystal
+bus.send(Arcana::Envelope.new(from: "@arcana", to: "@mj",
+  payload: JSON::Any.new("Yes, that works."), id: "5f1e09a2", re: "8325487c"))
+```
+
+A value in any other form is dropped, so neither field can carry
+anything else into the headers of a file written from it.
+
 ## Development
 
 ```sh

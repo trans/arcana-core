@@ -136,6 +136,14 @@ describe "Bus topics" do
     bus.pending("@reader").should eq(0)
   end
 
+  it "keeps a post's id and what it answers" do
+    bus, _ = topic_bus
+    env = Arcana::Envelope.new(from: "@writer", subject: "re", payload: JSON::Any.new("yes"), id: "8325487c", re: "#news:1")
+    bus.publish("#news", env)
+    stored = bus.topic_log("#news").read[0].envelope
+    {stored.id, stored.re}.should eq({"8325487c", "#news:1"})
+  end
+
   it "notifies subscribers with where to read the post, not the post" do
     bus, _ = topic_bus
     bus.subscribe("#news", "@reader")

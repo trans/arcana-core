@@ -25,6 +25,22 @@ describe Arcana::Envelope do
     e.ordering.should eq(Arcana::Ordering::Sync)
   end
 
+  describe "id and re" do
+    it "takes ids of 8 or more hex digits, and a message's id or a topic post as re" do
+      env = Arcana::Envelope.new(from: "@a", id: "8325487c", re: "ab12cd34ef56ab78")
+      {env.id, env.re}.should eq({"8325487c", "ab12cd34ef56ab78"})
+      Arcana::Envelope.new(from: "@a", re: "#news:12").re.should eq("#news:12")
+    end
+
+    it "drops anything else, so nothing can ride into a mail file's headers" do
+      env = Arcana::Envelope.new(from: "@a", id: "8325487c\nFrom: @mallory", re: "abc")
+      {env.id, env.re}.should eq({nil, nil})
+      Arcana::Envelope.new(from: "@a", re: "#news").re.should be_nil
+      Arcana::Envelope.new(from: "@a", re: "#news:3\nVia: x").re.should be_nil
+      Arcana::Envelope.from_json(%({"from":"@a","id":"xyz","re":42})).id.should be_nil
+    end
+  end
+
   describe "#reply" do
     it "creates a reply addressed to reply_to" do
       original = Arcana::Envelope.new(

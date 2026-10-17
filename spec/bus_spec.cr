@@ -106,6 +106,15 @@ describe Arcana::Bus do
       editor.try_receive.not_nil!.payload.as_s.should eq("chapter 1")
     end
 
+    it "carries a message's id and re to each subscriber" do
+      bus = Arcana::Bus.new
+      a = bus.mailbox("a")
+      bus.subscribe("topic", "a")
+      bus.publish("topic", Arcana::Envelope.new(from: "src", id: "8325487c", re: "ab12cd34"))
+      got = a.try_receive.not_nil!
+      {got.id, got.re}.should eq({"8325487c", "ab12cd34"})
+    end
+
     it "sets 'to' to each subscriber's address" do
       bus = Arcana::Bus.new
       a = bus.mailbox("a")

@@ -22,6 +22,18 @@ describe "Arcana::Envelope JSON serialization" do
     restored.reply_to.should eq("alice:reply")
   end
 
+  it "round-trips a message id and what it answers" do
+    env = Arcana::Envelope.new(from: "@a", to: "@b", id: "8325487c", re: "#arcana.releases:3")
+    restored = Arcana::Envelope.from_json(env.to_json)
+    {restored.id, restored.re}.should eq({"8325487c", "#arcana.releases:3"})
+  end
+
+  it "leaves out a missing id and re" do
+    json = JSON.parse(Arcana::Envelope.new(from: "a").to_json)
+    json["id"]?.should be_nil
+    json["re"]?.should be_nil
+  end
+
   it "handles missing optional fields" do
     json = %({"from":"a","to":"b"})
     env = Arcana::Envelope.from_json(json)
