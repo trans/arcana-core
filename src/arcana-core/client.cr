@@ -1,6 +1,7 @@
 require "http/web_socket"
 require "uri"
 require "json"
+require "./signing"
 
 module Arcana
   # WebSocket client for connecting to an Arcana bus server.
@@ -39,6 +40,15 @@ module Arcana
   # its mailbox collecting, when the client disconnects. A project's
   # token is the one in its `.ai/arcana.token`.
   #
+  # With `key`, the project's `Key` (its `.ai/arcana.key`), the client
+  # proves the address is its own: the join offers the public key, the
+  # bus answers with a challenge, and the client signs it (see
+  # `Signing`). The bus then holds the address for that key and stamps
+  # what the client sends `verified`; `verified?` turns true once it
+  # has. Each envelope the client sends also carries its signature, so
+  # the receiver can check it too. A bus that doesn't check keys sends
+  # no challenge, and the client works as one without a key.
+  #
   class Client
     getter address : String
 
@@ -47,6 +57,14 @@ module Arcana
     @pending_replies = {} of String => Channel(Envelope)
     @send_mutex = Mutex.new
     @pending_mutex = Mutex.new
+    @bus_host = ""
+
+    # Has the bus accepted this client's proof that the address is its
+    # own? (Only with a `key`.)
+    getter? verified = false
+
+    # The last error the bus sent, such as a refused join.
+    getter last_error : String?
 
     def initialize(
       url : String,
@@ -59,6 +77,7 @@ module Arcana
       @tags : Array(String) = [] of String,
       @listed : Bool = true,
       @owner_token : String? = nil,
+      @key : Key? = nil,
     )
       @url = url
       Directory.validate_address(@address)
@@ -95,6 +114,9 @@ module Arcana
       path = uri.path.empty? ? "/bus" : uri.path
       tls = uri.scheme == "wss"
 
+      # The Host header HTTP::WebSocket sends, which a join proof names.
+      @bus_host = "#{host}:#{port}"
+      @verified = false
       ws = HTTP::WebSocket.new(host: host, port: port, path: path, tls: tls)
       @ws = ws
 
@@ -114,20 +136,22 @@ module Arcana
       ws.run
     end
 
-    # Send an envelope to its `to` address.
+    # Send an envelope to its `to` address (signed, with a `key`).
     def send(envelope : Envelope)
       send_frame({
         "type"     => JSON::Any.new("send"),
-        "envelope" => JSON.parse(envelope.to_json),
+        "envelope" => JSON.parse(signed(envelope).to_json),
       })
     end
 
-    # Publish an envelope to all subscribers of `topic`.
+    # Publish an envelope to all subscribers of `topic`. Its `to` becomes
+    # the topic, as the bus stores it, so a signature still matches.
     def publish(topic : String, envelope : Envelope)
+      envelope.to = topic
       send_frame({
         "type"     => JSON::Any.new("publish"),
         "topic"    => JSON::Any.new(topic),
-        "envelope" => JSON.parse(envelope.to_json),
+        "envelope" => JSON.parse(signed(envelope).to_json),
       })
     end
 
@@ -204,7 +228,14 @@ module Arcana
       if token = @owner_token
         frame["owner_token"] = JSON::Any.new(token)
       end
+      if key = @key
+        frame["key"] = JSON::Any.new(key.public_key)
+      end
       send_frame(frame)
+    end
+
+    private def signed(envelope : Envelope) : Envelope
+      (key = @key) ? envelope.signed(key) : envelope
     end
 
     private def send_frame(frame : Hash(String, JSON::Any))
@@ -214,7 +245,9 @@ module Arcana
     end
 
     private def handle_incoming(msg : String)
-      envelope = Envelope.from_json(msg)
+      parsed = JSON.parse(msg)
+      return if bus_frame?(parsed)
+      envelope = Envelope.from_json(parsed)
 
       # Route replies to any pending request() callers first.
       channel = @pending_mutex.synchronize { @pending_replies[envelope.correlation_id]? }
@@ -224,6 +257,38 @@ module Arcana
       end
 
       @handler.try(&.call(envelope))
+    end
+
+    # Handle a frame from the bus itself rather than an envelope: a join
+    # challenge, the bus's word that the join is proved, or an error.
+    private def bus_frame?(frame : JSON::Any) : Bool
+      return false unless frame.as_h?
+      case frame["type"]?.try(&.as_s?)
+      when "challenge"
+        answer_challenge(frame["challenge"]?.try(&.as_s?) || "")
+        true
+      when "joined"
+        @verified = frame["verified"]?.try(&.as_bool?) || false
+        true
+      else
+        return false if frame["from"]?
+        if error = frame["error"]?.try(&.as_s?)
+          @last_error = error
+          STDERR.puts "Arcana::Client (#{@address}): the bus said: #{error}"
+          true
+        else
+          false
+        end
+      end
+    end
+
+    private def answer_challenge(challenge : String) : Nil
+      key = @key
+      return unless key && !challenge.empty?
+      send_frame({
+        "type"      => JSON::Any.new("prove"),
+        "signature" => JSON::Any.new(key.sign(Signing.join_proof(@bus_host, @address, challenge))),
+      })
     end
   end
 end

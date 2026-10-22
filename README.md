@@ -150,6 +150,36 @@ bus.send(Arcana::Envelope.new(from: "@arcana", to: "@mj",
 A value in any other form is dropped, so neither field can carry
 anything else into the headers of a file written from it.
 
+## Proving who sends
+
+A project proves its addresses are its own with an Ed25519 key pair,
+`Arcana::Key`. The private key stays in the project (PKCS#8 PEM, as
+`openssl genpkey -algorithm ed25519` writes it); the bus holds only the
+public key.
+
+```crystal
+key = Arcana::Key.load_or_create(".ai/arcana.key")  # made once, mode 0600
+client = Arcana::Client.new(url: "ws://localhost:19118/bus",
+  address: "mj:voice", kind: Arcana::Directory::Kind::Service, key: key)
+```
+
+With a key, the client's `join` offers the public key, signs the
+challenge the bus sends back, and signs each envelope it sends. The bus
+stamps what it can vouch for `verified`; a receiver that would rather
+not trust the bus checks the signature itself:
+
+```crystal
+client.on_message do |envelope|
+  next unless envelope.signer == key_listed_for(envelope.from)
+  # ...
+end
+```
+
+`Arcana::Signing` defines what is signed, as canonical JSON (RFC 8785,
+`Arcana::Canonical`) that a client in any language can produce: the
+join proof, signed REST requests (`Arcana-Key`, `Arcana-Time`,
+`Arcana-Nonce` and `Arcana-Signature` headers) and envelopes.
+
 ## Development
 
 ```sh

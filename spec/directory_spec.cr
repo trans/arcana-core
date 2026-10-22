@@ -568,4 +568,75 @@ describe Arcana::Directory do
       end
     end
   end
+
+  describe "claim (keys)" do
+    agent = ->(desc : String) {
+      Arcana::Directory::Listing.new(address: "@proj", name: "@proj", description: desc)
+    }
+    key = Arcana::Key.generate.public_key
+    other = Arcana::Key.generate.public_key
+
+    it "holds a free address for the key, and shows the key in its listing" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), key: key).should eq(Arcana::Directory::Claim::Registered)
+      dir.key_for("@proj").should eq(key)
+      dir.held?("@proj").should be_true
+      JSON.parse(dir.to_json(dir.lookup("@proj").not_nil!))["key"].should eq(key)
+    end
+
+    it "refreshes for the same key and refuses another" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), key: key)
+      dir.claim(agent.call("second"), key: key).should eq(Arcana::Directory::Claim::Yours)
+      dir.lookup("@proj").not_nil!.description.should eq("second")
+      expect_raises(Arcana::Directory::HeldError, /another key/) { dir.claim(agent.call("x"), key: other) }
+    end
+
+    it "moves an address held under an owner token to the key when the token is shown, and the token still works" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), "tok")
+      expect_raises(Arcana::Directory::HeldError, /move the address to your key/) { dir.claim(agent.call("x"), key: key) }
+      dir.claim(agent.call("moved"), "tok", key: key).should eq(Arcana::Directory::Claim::Moved)
+      dir.key_for("@proj").should eq(key)
+      dir.claim(agent.call("by token"), "tok").should eq(Arcana::Directory::Claim::Yours)
+      dir.check_owner!("@proj", "tok")
+    end
+
+    it "takes an address held by neither a key nor a token" do
+      dir = Arcana::Directory.new
+      dir.register(agent.call("legacy"))
+      dir.claim(agent.call("mine"), key: key).should eq(Arcana::Directory::Claim::Claimed)
+    end
+
+    it "keeps an address held by a key alone from a token" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), key: key)
+      expect_raises(Arcana::Directory::HeldError, /held by a key/) { dir.claim(agent.call("x"), "tok") }
+      expect_raises(Arcana::Directory::HeldError, /held by a key/) { dir.check_owner!("@proj", "tok") }
+    end
+
+    it "check_holder! takes the key or the token" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), "tok", key: key)
+      dir.check_holder!("@proj", key: key)
+      dir.check_holder!("@proj", owner_token: "tok")
+      expect_raises(Arcana::Directory::HeldError) { dir.check_holder!("@proj", key: other) }
+      expect_raises(Arcana::Directory::HeldError) { dir.check_holder!("@proj") }
+    end
+
+    it "refuses what isn't a public key" do
+      expect_raises(Arcana::Error, /not a public key/) { Arcana::Directory.new.claim(agent.call("x"), key: "ed25519:short") }
+    end
+
+    it "forgets the key on unregister, and keeps keys for a snapshot" do
+      dir = Arcana::Directory.new
+      dir.claim(agent.call("first"), key: key)
+      dir.keys.should eq({"@proj" => key})
+      dir.unregister("@proj")
+      dir.key_for("@proj").should be_nil
+      dir.held?("@proj").should be_false
+      dir.set_key("@proj", key)
+      dir.key_for("@proj").should eq(key)
+    end
+  end
 end

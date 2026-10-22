@@ -1,6 +1,7 @@
 require "json"
 require "./error"
 require "./events"
+require "./key"
 
 module Arcana
   # Registry of agent and service capabilities.
@@ -125,6 +126,7 @@ module Arcana
     @busy = {} of String => Bool
     @last_seen = {} of String => Time
     @owner_tokens = {} of String => String
+    @keys = {} of String => String
     @offline = Set(String).new
     @mutex = Mutex.new
 
@@ -257,8 +259,9 @@ module Arcana
       ))
     end
 
-    # Raised by `claim` and `check_owner!` when an address is held under
-    # an owner token the caller didn't present.
+    # Raised by `claim`, `check_holder!` and `check_owner!` when an
+    # address is held under an owner token or a key the caller didn't
+    # present.
     class HeldError < Error
       getter address : String
 
@@ -270,8 +273,9 @@ module Arcana
     # What `claim` did.
     enum Claim
       Registered # the address was free
-      Yours      # already held under this owner token; listing refreshed
-      Claimed    # held without an owner token; now held under this one
+      Yours      # already held under this owner token or key; listing refreshed
+      Claimed    # held by neither; now held under the one given
+      Moved      # held under the owner token shown; now held by the key too
     end
 
     # Register `listing`, or refresh it when `owner_token` shows the
@@ -287,60 +291,105 @@ module Arcana
     #   unowned listing protects nothing, so taking it gives nothing away.
     # - Otherwise raises: `HeldError` when another owner token holds it,
     #   `Error` ("Address already registered") when neither side has one.
-    def claim(listing : Listing, owner_token : String? = nil) : Claim
+    #
+    # With `key`, a public key the caller has proved it holds (see
+    # `Signing`), the address is held by that key instead:
+    #
+    # - Free, or held by neither a key nor a token: held by the key.
+    # - Held by the same key: refreshed (`Yours`).
+    # - Held under an owner token, shown here: held by the key too
+    #   (`Moved`), so a project's address moves to its key once. Until
+    #   owner tokens retire, the token still works for it.
+    # - Held by another key, or under a token not shown: `HeldError`.
+    #
+    # An address held by a key and no token can't be claimed by a token.
+    def claim(listing : Listing, owner_token : String? = nil, key : String? = nil) : Claim
       token = owner_token.try(&.presence)
+      key = key.try(&.presence)
+      raise Error.new("not a public key: #{key}") if key && !Key.valid_public_key?(key)
       address = listing.address
       Directory.validate_address(address)
       validate_kind_and_sigil!(address, listing.kind)
       result = @mutex.synchronize do
         outcome = Claim::Registered
         if existing = @listings[address]?
-          held = @owner_tokens[address]?
-          if held && token == held
-            outcome = Claim::Yours
-          elsif held
-            raise HeldError.new(address, held_message(address, token))
-          elsif token
-            outcome = Claim::Claimed
-          else
-            raise Error.new("Address already registered: #{address} (it has no owner token, so the bus can't tell whether it's you)")
-          end
+          outcome = claim_outcome(address, token, key)
           listing = refreshed(existing, listing)
         end
         @listings[address] = listing
-        @owner_tokens[address] = token if token
+        @owner_tokens[address] = token if token && !@owner_tokens.has_key?(address)
+        @keys[address] = key if key
         @last_seen[address] = Time.utc
         @offline.delete(address)
         outcome
       end
       event_type = case result
-                   when .yours?   then "listing.refreshed"
-                   when .claimed? then "listing.claimed"
-                   else                "listing.registered"
+                   when .yours?            then "listing.refreshed"
+                   when .claimed?, .moved? then "listing.claimed"
+                   else                         "listing.registered"
                    end
-      @events.try &.record(Events::Event.new(
-        type: event_type,
-        subject: address,
-        metadata: {
-          "kind" => JSON::Any.new(listing.kind.to_s.downcase),
-          "name" => JSON::Any.new(listing.name),
-        } of String => JSON::Any,
-      ))
+      metadata = {
+        "kind" => JSON::Any.new(listing.kind.to_s.downcase),
+        "name" => JSON::Any.new(listing.name),
+      } of String => JSON::Any
+      metadata["key"] = JSON::Any.new(key) if key
+      @events.try &.record(Events::Event.new(type: event_type, subject: address, metadata: metadata))
       result
     end
 
-    # Is `address` held under an owner token?
+    # How a claim of a listed address turns out, or why it can't.
+    private def claim_outcome(address : String, token : String?, key : String?) : Claim
+      held_token = @owner_tokens[address]?
+      held_key = @keys[address]?
+      if key
+        if held_key
+          return Claim::Yours if key == held_key
+          raise HeldError.new(address, "#{address} is held by another key")
+        end
+        return Claim::Claimed unless held_token
+        return Claim::Moved if token == held_token
+        raise HeldError.new(address, "#{held_message(address, token)}; show it once to move the address to your key")
+      end
+      if held_key && !held_token
+        raise HeldError.new(address, key_held_message(address))
+      elsif held_token && token == held_token
+        Claim::Yours
+      elsif held_token
+        raise HeldError.new(address, held_message(address, token))
+      elsif token
+        Claim::Claimed
+      else
+        raise Error.new("Address already registered: #{address} (it has no owner token, so the bus can't tell whether it's you)")
+      end
+    end
+
+    # Is `address` held, under an owner token or by a key?
     def held?(address : String) : Bool
-      @mutex.synchronize { @owner_tokens.has_key?(address) }
+      @mutex.synchronize { @owner_tokens.has_key?(address) || @keys.has_key?(address) }
+    end
+
+    # The public key holding `address`, if a key holds it.
+    def key_for(address : String) : String?
+      @mutex.synchronize { @keys[address]? }
+    end
+
+    # Raises `HeldError` unless the caller shows what `address` is held
+    # under: its owner token, or the key holding it (one the caller has
+    # proved it holds). Addresses held by neither accept anything.
+    def check_holder!(address : String, owner_token : String? = nil, key : String? = nil) : Nil
+      held_token, held_key = @mutex.synchronize { {@owner_tokens[address]?, @keys[address]?} }
+      return unless held_token || held_key
+      return if key && key == held_key
+      return if owner_token && owner_token == held_token
+      message = held_token ? held_message(address, owner_token.try(&.presence)) : key_held_message(address)
+      raise HeldError.new(address, message)
     end
 
     # Raises `HeldError` unless `owner_token` matches the owner token the
-    # address is held under. Addresses held without one accept anything.
+    # address is held under. Addresses held by neither a token nor a key
+    # accept anything; one held by a key alone needs `check_holder!`.
     def check_owner!(address : String, owner_token : String?) : Nil
-      held = @mutex.synchronize { @owner_tokens[address]? }
-      return unless held
-      return if owner_token == held
-      raise HeldError.new(address, held_message(address, owner_token.try(&.presence)))
+      check_holder!(address, owner_token: owner_token)
     end
 
     # A re-registration refreshes the listing: fields it gives replace
@@ -360,6 +409,10 @@ module Arcana
       )
     end
 
+    private def key_held_message(address : String) : String
+      "#{address} is held by a key: changing it needs that key's signature"
+    end
+
     private def held_message(address : String, given : String?) : String
       if given
         "#{address} is held by another owner: the owner token doesn't match"
@@ -377,6 +430,17 @@ module Arcana
     # Restore an owner token (for snapshot load).
     def set_owner_token(address : String, token : String) : Nil
       @mutex.synchronize { @owner_tokens[address] = token }
+    end
+
+    # Public keys by address (for snapshot save). Listings show them too:
+    # a public key is no secret.
+    def keys : Hash(String, String)
+      @mutex.synchronize { @keys.dup }
+    end
+
+    # Restore the key holding an address (for snapshot load).
+    def set_key(address : String, key : String) : Nil
+      @mutex.synchronize { @keys[address] = key }
     end
 
     # Mark a listing online or offline. Offline means no session is
@@ -468,6 +532,7 @@ module Arcana
             @busy.delete(addr)
             @last_seen.delete(addr)
             @owner_tokens.delete(addr)
+            @keys.delete(addr)
             @offline.delete(addr)
             true
           else
@@ -492,6 +557,7 @@ module Arcana
         @busy.delete(address)
         @last_seen.delete(address)
         @owner_tokens.delete(address)
+        @keys.delete(address)
         @offline.delete(address)
         r
       end
@@ -538,7 +604,6 @@ module Arcana
     def by_tag(tag : String) : Array(Listing)
       @mutex.synchronize { @listings.values.select { |l| l.tags.includes?(tag) } }
     end
-
 
     # Listings provided by a given owner (service address prefix).
     def by_owner(owner : String) : Array(Listing)
@@ -685,6 +750,7 @@ module Arcana
         json.field "name", l.name
         json.field "description", l.description
         json.field "kind", l.kind.to_s.downcase
+        json.field "key", @keys[l.address] if @keys.has_key?(l.address)
         json.field "busy", @busy[l.address]? || false unless l.kind.topic?
         if l.kind.topic?
           # `last_seq` lets a reader see a new post without subscribing:

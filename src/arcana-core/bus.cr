@@ -337,7 +337,9 @@ module Arcana
     # `notify_subscribers`). Raises unless the topic is registered.
     #
     # For any other topic name, each subscriber gets a full copy, with
-    # `to` set to its address, and nil is returned.
+    # `to` set to its address, and nil is returned. The copy keeps the
+    # bus's `verified` stamp but not the sender's signature, which covers
+    # `to`.
     def publish(topic : String, envelope : Envelope) : Int64?
       return publish_post(topic, envelope) if Directory.topic?(topic)
       @directory.try(&.touch(envelope.from)) unless envelope.from.empty?
@@ -357,6 +359,7 @@ module Arcana
           reply_to: envelope.reply_to,
           id: envelope.id,
           re: envelope.re,
+          verified: envelope.verified,
         )
         mb.deliver(msg)
         delivered_to += 1
@@ -384,6 +387,8 @@ module Arcana
         timestamp: envelope.timestamp,
         id: envelope.id,
         re: envelope.re,
+        signature: envelope.signature,
+        verified: envelope.verified,
       )
       seq = log.append(post)
       notified = notify_subscribers(topic, post, seq)
@@ -481,8 +486,11 @@ module Arcana
         payload: envelope.payload,
         correlation_id: envelope.correlation_id,
         reply_to: reply_address,
+        timestamp: envelope.timestamp,
         id: envelope.id,
         re: envelope.re,
+        signature: envelope.signature,
+        verified: envelope.verified,
       )
 
       send(msg)

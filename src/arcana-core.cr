@@ -1,5 +1,8 @@
 require "./arcana-core/error"
 require "./arcana-core/json_helpers"
+require "./arcana-core/canonical"
+require "./arcana-core/key"
+require "./arcana-core/signing"
 require "./arcana-core/envelope"
 require "./arcana-core/protocol"
 require "./arcana-core/topic_log"
