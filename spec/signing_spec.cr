@@ -26,6 +26,7 @@ describe Arcana::Signing do
       signed = Arcana::Signing.signed_request(headers, "POST", "127.0.0.1:19118", "/deliver", %({"from":"@proj"})).not_nil!
       signed.key.should eq(key.public_key)
       signed.nonce.size.should eq(32)
+      headers["Host"].should eq("127.0.0.1:19118")
     end
 
     it "is nil for a request that isn't signed" do

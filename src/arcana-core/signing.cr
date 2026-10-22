@@ -65,11 +65,13 @@ module Arcana
       })
     end
 
-    # The headers that sign a REST request with `key`.
+    # The headers that sign a REST request with `key`. They include
+    # `Host`, set to `bus`, so the header sent is the one signed.
     def self.sign_request(key : Key, method : String, bus : String, path : String, body : String | Bytes, time : Time = Time.utc) : HTTP::Headers
       seconds = time.to_unix
       nonce = Random::Secure.hex(16)
       HTTP::Headers{
+        "Host"           => bus,
         KEY_HEADER       => key.public_key,
         TIME_HEADER      => seconds.to_s,
         NONCE_HEADER     => nonce,
