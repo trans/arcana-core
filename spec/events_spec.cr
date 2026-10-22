@@ -189,6 +189,7 @@ describe Arcana::Events do
         types.should contain("message.sent")
         types.should contain("message.delivered")
         types.should contain("message.consumed")
+        events.find! { |e| e.type == "message.sent" }.metadata["verified"].should eq(false)
       ensure
         backend.close
         FileUtils.rm_rf(dir_path)

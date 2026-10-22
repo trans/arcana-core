@@ -223,7 +223,10 @@ module Arcana
         subject: envelope.to,
         object: (envelope.from.empty? ? nil : envelope.from),
         correlation_id: envelope.correlation_id,
-        metadata: {"subject" => JSON::Any.new(envelope.subject)} of String => JSON::Any,
+        metadata: {
+          "subject"  => JSON::Any.new(envelope.subject),
+          "verified" => JSON::Any.new(envelope.verified),
+        } of String => JSON::Any,
       ))
     end
 
