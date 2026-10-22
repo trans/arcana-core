@@ -33,6 +33,12 @@ module Arcana
   #     listed: false,           # mailbox only, no directory entry
   #   )
   #
+  # With `owner_token`, the join claims the address under it, as
+  # `POST /register` does: no other client can then claim it, and a
+  # join showing another token is refused. The address stays listed,
+  # its mailbox collecting, when the client disconnects. A project's
+  # token is the one in its `.ai/arcana.token`.
+  #
   class Client
     getter address : String
 
@@ -52,6 +58,7 @@ module Arcana
       @schema : JSON::Any? = nil,
       @tags : Array(String) = [] of String,
       @listed : Bool = true,
+      @owner_token : String? = nil,
     )
       @url = url
       Directory.validate_address(@address)
@@ -194,6 +201,9 @@ module Arcana
       end
       # Only emit listed=false; the server defaults to listed when absent.
       frame["listed"] = JSON::Any.new(false) unless @listed
+      if token = @owner_token
+        frame["owner_token"] = JSON::Any.new(token)
+      end
       send_frame(frame)
     end
 

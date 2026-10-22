@@ -521,6 +521,8 @@ describe Arcana::Directory do
       expect_raises(Arcana::Directory::HeldError) { dir.check_owner!("@proj", "nope") }
       dir.register(Arcana::Directory::Listing.new(address: "@free", name: "f", description: "f"))
       dir.check_owner!("@free", nil)
+      dir.held?("@proj").should be_true
+      dir.held?("@free").should be_false
     end
 
     it "forgets the owner token on unregister and prune" do

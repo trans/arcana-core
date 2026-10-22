@@ -329,6 +329,11 @@ module Arcana
       result
     end
 
+    # Is `address` held under an owner token?
+    def held?(address : String) : Bool
+      @mutex.synchronize { @owner_tokens.has_key?(address) }
+    end
+
     # Raises `HeldError` unless `owner_token` matches the owner token the
     # address is held under. Addresses held without one accept anything.
     def check_owner!(address : String, owner_token : String?) : Nil
