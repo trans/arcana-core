@@ -120,6 +120,22 @@ module Arcana
       end
     end
 
+    # The variable naming the key file of a process that runs apart from
+    # its project's `.ai/`, such as a sandboxed or deployed service. Such
+    # a process has a key of its own, kept with its state, which holds
+    # only its own addresses.
+    FILE_ENV = "ARCANA_KEY_FILE"
+
+    # The key in the file `ARCANA_KEY_FILE` names, made there on first
+    # use; nil when the variable isn't set.
+    #
+    #   # ARCANA_KEY_FILE=/var/lib/mj/arcana.key
+    #   client = Arcana::Client.new(..., key: Arcana::Key.from_env)
+    def self.from_env : Key?
+      path = ENV[FILE_ENV]?.presence || return nil
+      load_or_create(path)
+    end
+
     # Sign `data`, returning the signature in base64.
     def sign(data : String | Bytes) : String
       bytes = data.to_slice

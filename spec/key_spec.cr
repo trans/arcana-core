@@ -66,6 +66,23 @@ describe Arcana::Key do
     end
   end
 
+  it "is made where ARCANA_KEY_FILE says, and is nil without it" do
+    dir = File.tempname("arcana-key-env")
+    Dir.mkdir(dir)
+    saved = ENV["ARCANA_KEY_FILE"]?
+    begin
+      ENV.delete("ARCANA_KEY_FILE")
+      Arcana::Key.from_env.should be_nil
+      ENV["ARCANA_KEY_FILE"] = File.join(dir, "arcana.key")
+      key = Arcana::Key.from_env.not_nil!
+      Arcana::Key.load(File.join(dir, "arcana.key")).public_key.should eq(key.public_key)
+      Arcana::Key.from_env.not_nil!.public_key.should eq(key.public_key)
+    ensure
+      saved ? (ENV["ARCANA_KEY_FILE"] = saved) : ENV.delete("ARCANA_KEY_FILE")
+      FileUtils.rm_rf(dir)
+    end
+  end
+
   it "reads a key openssl made, and openssl checks what it signs, and the other way round" do
     dir = File.tempname("arcana-key-openssl")
     Dir.mkdir(dir)

@@ -175,6 +175,17 @@ client.on_message do |envelope|
 end
 ```
 
+A process that runs apart from its project's `.ai/`, such as a
+sandboxed or deployed service, has a key of its own, kept with its
+state and holding only its own addresses. Set `ARCANA_KEY_FILE` to
+where it lives, and `Arcana::Key.from_env` makes it there on first use:
+
+```crystal
+# ARCANA_KEY_FILE=/var/lib/mj/arcana.key
+client = Arcana::Client.new(url: "ws://localhost:19118/bus",
+  address: "mj:voice", kind: Arcana::Directory::Kind::Service, key: Arcana::Key.from_env)
+```
+
 `Arcana::Signing` defines what is signed, as canonical JSON (RFC 8785,
 `Arcana::Canonical`) that a client in any language can produce: the
 join proof, signed REST requests (`Arcana-Key`, `Arcana-Time`,
