@@ -4,8 +4,14 @@ require "./error"
 
 # The few libcrypto calls Ed25519 needs. Crystal's OpenSSL bindings
 # don't cover raw keys or one-shot signing; OpenSSL has had both since
-# 1.1.1. Digest contexts come from the stdlib's `LibCrypto`, which
-# already binds them.
+# 1.1.1. Digest contexts and the error queue come from the stdlib's
+# `LibCrypto`, which already binds them.
+#
+# Crystal allows one signature per C function in a program, so another
+# shard that binds these calls must declare them the same way. They
+# match azb's (Azooka Bay's client). `EVP_PKEY_free` isn't bound at all:
+# the openssl_ext shard, which jwt depends on, binds it with a type of
+# its own, so `Key` looks it up at run time instead.
 @[Link("crypto")]
 lib LibArcanaCrypto
   alias EVP_PKEY = Void*
@@ -16,12 +22,10 @@ lib LibArcanaCrypto
   fun pkey_new_raw_private = EVP_PKEY_new_raw_private_key(type : LibC::Int, e : Void*, priv : UInt8*, len : LibC::SizeT) : EVP_PKEY
   fun pkey_new_raw_public = EVP_PKEY_new_raw_public_key(type : LibC::Int, e : Void*, pub : UInt8*, len : LibC::SizeT) : EVP_PKEY
   fun pkey_get_raw_public = EVP_PKEY_get_raw_public_key(pkey : EVP_PKEY, pub : UInt8*, len : LibC::SizeT*) : LibC::Int
-  fun pkey_free = EVP_PKEY_free(pkey : EVP_PKEY)
-  fun digest_sign_init = EVP_DigestSignInit(ctx : EVP_MD_CTX, pctx : Void**, type : Void*, e : Void*, pkey : EVP_PKEY) : LibC::Int
+  fun digest_sign_init = EVP_DigestSignInit(ctx : EVP_MD_CTX, pctx : Void*, type : Void*, e : Void*, pkey : EVP_PKEY) : LibC::Int
   fun digest_sign = EVP_DigestSign(ctx : EVP_MD_CTX, sig : UInt8*, siglen : LibC::SizeT*, tbs : UInt8*, tbslen : LibC::SizeT) : LibC::Int
-  fun digest_verify_init = EVP_DigestVerifyInit(ctx : EVP_MD_CTX, pctx : Void**, type : Void*, e : Void*, pkey : EVP_PKEY) : LibC::Int
+  fun digest_verify_init = EVP_DigestVerifyInit(ctx : EVP_MD_CTX, pctx : Void*, type : Void*, e : Void*, pkey : EVP_PKEY) : LibC::Int
   fun digest_verify = EVP_DigestVerify(ctx : EVP_MD_CTX, sig : UInt8*, siglen : LibC::SizeT, tbs : UInt8*, tbslen : LibC::SizeT) : LibC::Int
-  fun err_clear = ERR_clear_error : Void
 end
 
 module Arcana
@@ -67,7 +71,20 @@ module Arcana
     end
 
     def finalize
-      LibArcanaCrypto.pkey_free(@pkey)
+      Key.free(@pkey)
+    end
+
+    # `EVP_PKEY_free`, found at run time (see `LibArcanaCrypto` for why
+    # it isn't bound). Nil only where libcrypto can't be looked up, as in
+    # a static build, and then keys aren't freed.
+    PKEY_FREE = begin
+      free = LibC.dlsym(LibC::RTLD_DEFAULT, "EVP_PKEY_free")
+      Proc(LibArcanaCrypto::EVP_PKEY, Nil).new(free, Pointer(Void).null) unless free.null?
+    end
+
+    # :nodoc:
+    def self.free(pkey : LibArcanaCrypto::EVP_PKEY) : Nil
+      PKEY_FREE.try &.call(pkey)
     end
 
     # Read a PKCS#8 PEM Ed25519 private key.
@@ -160,18 +177,18 @@ module Arcana
       bytes = data.to_slice
       pkey = LibArcanaCrypto.pkey_new_raw_public(LibArcanaCrypto::NID_ED25519, nil, raw, 32)
       if pkey.null?
-        LibArcanaCrypto.err_clear
+        Key.clear_errors
         return false
       end
       ctx = LibCrypto.evp_md_ctx_new
       begin
         ok = LibArcanaCrypto.digest_verify_init(ctx, nil, nil, nil, pkey) == 1 &&
              LibArcanaCrypto.digest_verify(ctx, sig, sig.size, bytes, bytes.size) == 1
-        LibArcanaCrypto.err_clear unless ok
+        Key.clear_errors unless ok
         ok
       ensure
         LibCrypto.evp_md_ctx_free(ctx)
-        LibArcanaCrypto.pkey_free(pkey)
+        Key.free(pkey)
       end
     end
 
@@ -186,9 +203,17 @@ module Arcana
       raw if raw && raw.size == 32
     end
 
+    # Empty OpenSSL's error queue, so a failure here isn't reported
+    # later by someone else's call.
+    # :nodoc:
+    def self.clear_errors : Nil
+      while LibCrypto.err_get_error != 0
+      end
+    end
+
     # :nodoc:
     def self.fail(message : String) : NoReturn
-      LibArcanaCrypto.err_clear
+      Key.clear_errors
       raise Error.new(message)
     end
 
