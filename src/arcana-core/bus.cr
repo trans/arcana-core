@@ -496,10 +496,12 @@ module Arcana
         verified: envelope.verified,
       )
 
-      send(msg)
-      result = reply_mb.receive(timeout)
-      remove_mailbox(reply_address)
-      result
+      begin
+        send(msg)
+        reply_mb.receive(timeout)
+      ensure
+        remove_mailbox(reply_address)
+      end
     end
   end
 end

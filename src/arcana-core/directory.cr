@@ -144,16 +144,17 @@ module Arcana
     # sets it; without it, topic listings show only their registration.
     property topic_status : Proc(String, TopicStatus?)?
 
-    # Is this address a service? (Contains `:` and is not an internal ephemeral.)
+    # Is this address a service's? (No sigil: a Toolset's bare name or
+    # `owner:capability`; not an internal ephemeral.) Registration holds
+    # every listing to its sigil, so the shape tells the kind.
     def self.service?(address : String) : Bool
       return false if address.starts_with?('_')
-      address.includes?(':')
+      Kind.from_address(address).service?
     end
 
-    # Is this address an agent? (Plain name, no colon.)
+    # Is this address an agent's? (The `@` sigil.)
     def self.agent?(address : String) : Bool
-      return false if address.starts_with?('_') || topic?(address)
-      !address.includes?(':')
+      address.starts_with?('@')
     end
 
     # Is this address a topic? (Leading `#` sigil.)
@@ -161,9 +162,10 @@ module Arcana
       address.starts_with?('#')
     end
 
-    # Return the owner half of a service address, or nil if not a service.
+    # Return the owner half of an `owner:capability` address, or nil for
+    # any other (an agent's, a topic's, a Toolset's bare name).
     def self.owner(address : String) : String?
-      return nil unless service?(address)
+      return nil unless service?(address) && address.includes?(':')
       address.partition(':').first
     end
 

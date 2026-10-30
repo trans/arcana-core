@@ -191,7 +191,7 @@ describe Arcana::Bus do
     it "returns nil on timeout" do
       bus = Arcana::Bus.new
       bus.mailbox("client")
-      bus.mailbox("server")  # server never replies
+      bus.mailbox("server") # server never replies
 
       result = bus.request(
         Arcana::Envelope.new(from: "client", to: "server"),
@@ -212,6 +212,22 @@ describe Arcana::Bus do
       # Reply mailbox should be cleaned up
       bus.has_mailbox?("_reply:#{env.correlation_id}").should be_false
     end
+
+    it "cleans up the reply mailbox when the request can't be sent" do
+      bus = Arcana::Bus.new
+      env = Arcana::Envelope.new(from: "@alice", to: "nobody:svc")
+      expect_raises(Arcana::Error, "No mailbox for address: nobody:svc") { bus.request(env) }
+      bus.has_mailbox?("_reply:#{env.correlation_id}").should be_false
+    end
+  end
+
+  describe "auto ordering" do
+    it "waits for a service's reply and leaves an agent's message" do
+      bus = Arcana::Bus.new
+      ["openai", "arcana:echo", "@alice", "#news"].map { |to|
+        bus.resolve_ordering(Arcana::Envelope.new(from: "@bob", to: to))
+      }.should eq([Arcana::Ordering::Sync, Arcana::Ordering::Sync, Arcana::Ordering::Async, Arcana::Ordering::Async])
+    end
   end
 
   describe "stale pruning" do
@@ -221,18 +237,25 @@ describe Arcana::Bus do
       bus.directory = dir
 
       dir.register(Arcana::Directory::Listing.new(
-        address: "stale", name: "Stale", description: "stale agent",
+        address: "@stale", name: "Stale", description: "stale agent",
       ))
       dir.register(Arcana::Directory::Listing.new(
         address: "arcana:svc", name: "Svc", description: "service",
       ))
-      dir.set_last_seen("stale", Time.utc - 2.days)
+      dir.register(Arcana::Directory::Listing.new(
+        address: "openai", name: "OpenAI", description: "a Toolset",
+      ))
+      mb = bus.mailbox("openai")
+      mb.last_activity = Time.utc - 30.days
+      dir.set_last_seen("@stale", Time.utc - 2.days)
       dir.set_last_seen("arcana:svc", Time.utc - 30.days)
+      dir.set_last_seen("openai", Time.utc - 30.days)
 
-      listings, _mailboxes = bus.prune_stale(1.day, 7.days)
-      listings.should contain("stale")
-      listings.should_not contain("arcana:svc")
+      listings, mailboxes = bus.prune_stale(1.day, 7.days)
+      listings.should eq(["@stale"])
+      mailboxes.should be_empty
       dir.lookup("arcana:svc").should_not be_nil
+      dir.lookup("openai").should_not be_nil
     end
 
     it "prunes mailboxes after listing is gone and mailbox TTL exceeded" do

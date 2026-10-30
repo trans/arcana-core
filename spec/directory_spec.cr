@@ -34,10 +34,13 @@ describe Arcana::Directory do
   end
 
   describe "address helpers" do
-    it "classifies services and agents by colon" do
+    it "classifies services and agents by sigil" do
       Arcana::Directory.service?("arcana:echo").should be_true
-      Arcana::Directory.service?("alice").should be_false
-      Arcana::Directory.agent?("alice").should be_true
+      Arcana::Directory.service?("anthropic").should be_true # a Toolset's bare name
+      Arcana::Directory.service?("@alice").should be_false
+      Arcana::Directory.service?("#news").should be_false
+      Arcana::Directory.agent?("@alice").should be_true
+      Arcana::Directory.agent?("anthropic").should be_false
       Arcana::Directory.agent?("arcana:echo").should be_false
     end
 
@@ -407,18 +410,18 @@ describe Arcana::Directory do
     it "prunes agent listings older than TTL" do
       dir = Arcana::Directory.new
       dir.register(Arcana::Directory::Listing.new(
-        address: "old", name: "Old", description: "old agent",
+        address: "@old", name: "Old", description: "old agent",
       ))
       dir.register(Arcana::Directory::Listing.new(
-        address: "new", name: "New", description: "fresh agent",
+        address: "@new", name: "New", description: "fresh agent",
       ))
-      dir.set_last_seen("old", Time.utc - 2.hours)
+      dir.set_last_seen("@old", Time.utc - 2.hours)
 
       pruned = dir.prune_stale_agents(1.hour)
-      pruned.should contain("old")
-      pruned.should_not contain("new")
-      dir.lookup("old").should be_nil
-      dir.lookup("new").should_not be_nil
+      pruned.should contain("@old")
+      pruned.should_not contain("@new")
+      dir.lookup("@old").should be_nil
+      dir.lookup("@new").should_not be_nil
     end
 
     it "never prunes service listings" do
@@ -426,10 +429,17 @@ describe Arcana::Directory do
       dir.register(Arcana::Directory::Listing.new(
         address: "arcana:svc", name: "Svc", description: "a service",
       ))
+      # A Toolset's bare name is a service too: a quiet bus kept pruning
+      # its built-in providers (anthropic, openai) after a week.
+      dir.register(Arcana::Directory::Listing.new(
+        address: "anthropic", name: "Anthropic", description: "a Toolset",
+      ))
       dir.set_last_seen("arcana:svc", Time.utc - 30.days)
+      dir.set_last_seen("anthropic", Time.utc - 30.days)
       pruned = dir.prune_stale_agents(1.hour)
       pruned.should be_empty
       dir.lookup("arcana:svc").should_not be_nil
+      dir.lookup("anthropic").should_not be_nil
     end
 
     it "refreshes last_seen via touch" do
